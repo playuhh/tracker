@@ -28,10 +28,10 @@ jobs:
 
       - name: Run scraper
         run: |
-          python scraper.py
+          python scraper.py  # Ensure this points to your script's filename if it's different
 
       - name: Upload CSV file
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3  # Updated to v3 for compatibility
         with:
           name: unit_prices
           path: unit_prices.csv
