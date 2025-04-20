@@ -47,6 +47,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin gh-pages
           git checkout gh-pages || git checkout -b gh-pages
+          git pull
           cp data/unit_prices.csv .
           git add unit_prices.csv
           git commit -m "Update unit prices" || echo "No changes to commit"
