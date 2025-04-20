@@ -43,12 +43,16 @@ jobs:
 
       - name: Commit CSV to gh-pages
         run: |
+          mkdir temp-gh-pages
+          cp data/unit_prices.csv temp-gh-pages/
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
           git fetch origin gh-pages
           git checkout gh-pages || git checkout -b gh-pages
-          git pull origin gh-pages
-          cp data/unit_prices.csv .
+          
+          cp temp-gh-pages/unit_prices.csv .
           git add unit_prices.csv
           git commit -m "Update unit prices" || echo "No changes to commit"
           git push origin gh-pages
