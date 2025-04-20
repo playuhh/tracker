@@ -2,11 +2,14 @@ name: Periodic Apartment Scraper
 
 on:
   schedule:
-    - cron: "0 6,10,14,18,22 * * *"  # Runs at 6 AM, 10 AM, 2 PM, 6 PM, and 10 PM UTC
-  workflow_dispatch:  # Allows manual triggering from GitHub UI
+    # Run roughly every 8 hours, spaced irregularly to appear natural
+    - cron: "7 3 * * *"   # 03:07 UTC
+    - cron: "13 11 * * *" # 11:13 UTC
+    - cron: "28 20 * * *" # 20:28 UTC
+  workflow_dispatch:  # Allows manual triggering
   pull_request:
     branches:
-      - main  # Replace 'main' with the branch you want to trigger on, typically 'main' or 'master'
+      - main
 
 jobs:
   run-scraper:
@@ -33,8 +36,25 @@ jobs:
         run: |
           python scraper.py
 
-      - name: Upload CSV file
-        uses: actions/upload-artifact@v4  # Changed to v2
+      - name: Configure Git for GitHub Pages
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Create a new branch for Pages
+        run: |
+          git checkout gh-pages
+          git pull origin gh-pages || echo "No previous content on gh-pages"
+
+      - name: Copy data to Pages branch
+        run: |
+          cp data/unit_prices.csv .
+          git add unit_prices.csv
+          git commit -m "Update unit prices"
+          git push origin gh-pages
+
+      - name: Upload CSV file (Artifact)
+        uses: actions/upload-artifact@v4
         with:
           name: unit_prices
-          path: unit_prices.csv
+          path: data/unit_prices.csv
