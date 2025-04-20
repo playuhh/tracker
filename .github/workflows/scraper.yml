@@ -4,18 +4,21 @@ on:
   schedule:
     - cron: "0 6,10,14,18,22 * * *"  # Runs at 6 AM, 10 AM, 2 PM, 6 PM, and 10 PM UTC
   workflow_dispatch:  # Allows manual triggering from GitHub UI
+  pull_request:
+    branches:
+      - main  # Replace 'main' with the branch you want to trigger on, typically 'main' or 'master'
 
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.8
+          python-version: 3.13
 
       - name: Install dependencies
         run: |
@@ -31,7 +34,7 @@ jobs:
           python scraper.py
 
       - name: Upload CSV file
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4  # Changed to v2
         with:
           name: unit_prices
           path: unit_prices.csv
