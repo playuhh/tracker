@@ -1,12 +1,18 @@
 name: Periodic Apartment Scraper
 
+permissions:
+  contents: write  # Needed to push to gh-pages
+
 on:
   schedule:
-    - cron: "0 6,10,14,18,22 * * *"  # Runs at 6 AM, 10 AM, 2 PM, 6 PM, and 10 PM UTC
-  workflow_dispatch:  # Allows manual triggering from GitHub UI
+    # Run roughly every 8 hours, spaced irregularly to appear natural
+    - cron: "7 3 * * *"   # 03:07 UTC
+    - cron: "13 11 * * *" # 11:13 UTC
+    - cron: "28 20 * * *" # 20:28 UTC
+  workflow_dispatch:  # Allows manual triggering
   pull_request:
     branches:
-      - main  # Replace 'main' with the branch you want to trigger on, typically 'main' or 'master'
+      - main
 
 jobs:
   run-scraper:
@@ -14,6 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Necessary for branch switching
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,8 +41,26 @@ jobs:
         run: |
           python scraper.py
 
-      - name: Upload CSV file
-        uses: actions/upload-artifact@v4  # Changed to v2
+      - name: Commit CSV to gh-pages
+        run: |
+          mkdir temp-gh-pages
+          cp data/unit_prices.csv temp-gh-pages/
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git fetch origin gh-pages
+          git checkout gh-pages || git checkout -b gh-pages
+          
+          cp temp-gh-pages/unit_prices.csv .
+          git add unit_prices.csv
+          git commit -m "Update unit prices" || echo "No changes to commit"
+          git push origin gh-pages --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload CSV file (Artifact)
+        uses: actions/upload-artifact@v4
         with:
           name: unit_prices
-          path: unit_prices.csv
+          path: data/unit_prices.csv
