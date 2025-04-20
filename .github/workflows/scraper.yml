@@ -55,7 +55,7 @@ jobs:
           cp temp-gh-pages/unit_prices.csv .
           git add unit_prices.csv
           git commit -m "Update unit prices" || echo "No changes to commit"
-          git push origin gh-pages
+          git push origin gh-pages --force
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
