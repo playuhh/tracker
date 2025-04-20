@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Historical Price Table</title>
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.11.5/css/jquery.dataTables.min.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.0/papaparse.min.js"></script>
+    <script src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.min.js"></script>
+</head>
+<body>
+    <h1>Historical Price Table</h1>
+
+    <!-- Filter Dropdowns -->
+    <div>
+        <label for="apartmentFilter">Filter by Apartment:</label>
+        <select id="apartmentFilter">
+            <option value="">All Apartments</option>
+        </select>
+
+        <label for="floorplanFilter">Filter by Floor Plan:</label>
+        <select id="floorplanFilter">
+            <option value="">All Floor Plans</option>
+        </select>
+    </div>
+
+    <!-- Table -->
+    <table id="historicalPriceTable" class="display">
+        <thead>
+            <tr>
+                <th>Timestamp</th>
+                <th>Apartment</th>
+                <th>Floorplan</th>
+                <th>Sqft</th>
+                <th>Move-in</th>
+                <th>Price</th>
+            </tr>
+        </thead>
+        <tbody>
+        </tbody>
+    </table>
+
+    <script>
+        let latestData = [];
+
+        // Function to load the CSV data and initialize the DataTable
+        function loadCSVData(filePath) {
+            Papa.parse(filePath, {
+                download: true,
+                header: true,
+                dynamicTyping: true,
+                complete: function(result) {
+                    const data = result.data.filter(row => row.timestamp && row.apartment && row.price);
+
+                    // Find the most recent timestamp
+                    const mostRecentTimestamp = new Date(Math.max(...data.map(row => new Date(row.timestamp))));
+
+                    // Filter the data to include only rows within 5 minutes of the most recent timestamp
+                    const fiveMinutesAgo = new Date(mostRecentTimestamp.getTime() - 5 * 60 * 1000);
+                    latestData = data.filter(row => {
+                        const rowTimestamp = new Date(row.timestamp);
+                        return rowTimestamp >= fiveMinutesAgo && rowTimestamp <= mostRecentTimestamp;
+                    });
+
+                    // Initialize the DataTable with the filtered data
+                    const table = $('#historicalPriceTable').DataTable({
+                        data: latestData,
+                        columns: [
+                            { data: 'timestamp' },
+                            { data: 'apartment' },
+                            { data: 'floorplan' },
+                            { data: 'sqft' },
+                            { data: 'move_in' },
+                            { data: 'price' }
+                        ]
+                    });
+
+                    // Populate apartment filter dropdown
+                    const apartments = [...new Set(latestData.map(row => row.apartment))];
+                    apartments.forEach(apartment => {
+                        $('#apartmentFilter').append(new Option(apartment, apartment));
+                    });
+
+                    // Populate floorplan filter dropdown
+                    const floorplans = [...new Set(latestData.map(row => row.floorplan))].sort();
+                    floorplans.forEach(floorplan => {
+                        $('#floorplanFilter').append(new Option(floorplan, floorplan));
+                    });
+
+                    // Add event listeners for filtering
+                    $('#apartmentFilter').on('change', function() {
+                        filterTable(table);
+                    });
+
+                    $('#floorplanFilter').on('change', function() {
+                        filterTable(table);
+                    });
+                },
+                error: function(error) {
+                    console.error("Error loading CSV: ", error);
+                }
+            });
+        }
+
+        // Function to filter the table based on selected filters
+        function filterTable(table) {
+            const apartmentFilter = $('#apartmentFilter').val();
+            const floorplanFilter = $('#floorplanFilter').val();
+
+            // Filter the data based on selected filters
+            const filteredData = latestData.filter(row => {
+                const apartmentMatch = apartmentFilter ? row.apartment === apartmentFilter : true;
+                const floorplanMatch = floorplanFilter ? row.floorplan === floorplanFilter : true;
+                return apartmentMatch && floorplanMatch;
+            });
+
+            // Clear the table and reload with filtered data
+            table.clear().rows.add(filteredData).draw();
+        }
+
+        // Load the CSV data and initialize the table
+        loadCSVData('unit_prices.csv');
+    </script>
+</body>
+</html>

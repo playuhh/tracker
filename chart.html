@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Price Line Chart with Filters</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script> <!-- Add jQuery here -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.0/papaparse.min.js"></script>
+</head>
+<body>
+    <h1>Price Line Chart</h1>
+
+    <!-- Filter Dropdowns -->
+    <div>
+        <label for="apartmentFilter">Filter by Apartment:</label>
+        <select id="apartmentFilter">
+            <option value="">All Apartments</option>
+        </select>
+
+        <label for="floorplanFilter">Filter by Floor Plan:</label>
+        <select id="floorplanFilter">
+            <option value="">All Floor Plans</option>
+        </select>
+    </div>
+
+    <!-- Line Chart -->
+    <canvas id="priceChart" width="400" height="200"></canvas>
+
+    <script>
+        let latestData = [];
+        let filteredData = [];
+        let groupedData = {}; // Store the grouped data
+
+        // Function to load CSV data and parse it for charting
+        Papa.parse('unit_prices.csv', {
+            download: true,
+            header: true,
+            dynamicTyping: true,
+            complete: function(result) {
+                const data = result.data.filter(row => row.timestamp && row.price);
+
+                // Convert timestamps to Date objects and round to the nearest hour
+                const dataWithHour = data.map(row => {
+                    const timestamp = new Date(row.timestamp);
+                    timestamp.setMinutes(0, 0, 0);  // Round to the start of the hour
+                    return {
+                        ...row,
+                        hour: timestamp,
+                        price: parsePrice(row.price) // Remove commas and dollar sign, parse price as a float
+                    };
+                });
+
+                // Group data by hour, apartment, floor plan, and sqft
+                dataWithHour.forEach(row => {
+                    const key = `${row.apartment}-${row.floorplan}-${row.sqft}`;
+                    if (!groupedData[key]) groupedData[key] = {};
+
+                    if (!groupedData[key][row.hour]) {
+                        groupedData[key][row.hour] = [];
+                    }
+
+                    groupedData[key][row.hour].push(row.price);
+                });
+
+                // Populate apartment filter dropdown
+                const apartments = [...new Set(dataWithHour.map(row => row.apartment))];
+                apartments.forEach(apartment => {
+                    $('#apartmentFilter').append(new Option(apartment, apartment));
+                });
+
+                // Populate floorplan filter dropdown, sorted alphabetically
+                const floorplans = [...new Set(dataWithHour.map(row => row.floorplan))].sort();
+                floorplans.forEach(floorplan => {
+                    $('#floorplanFilter').append(new Option(floorplan, floorplan));
+                });
+
+                // Initialize the filtered data
+                latestData = dataWithHour;
+                filteredData = latestData;
+
+                // Prepare datasets for the chart
+                updateChart();
+
+                // Add event listeners for filtering
+                $('#apartmentFilter').on('change', function() {
+                    filterData();
+                    updateChart();
+                });
+
+                $('#floorplanFilter').on('change', function() {
+                    filterData();
+                    updateChart();
+                });
+
+            },
+            error: function(error) {
+                console.error("Error loading CSV: ", error);
+            }
+        });
+
+        // Function to parse price by removing '$' and commas
+        function parsePrice(price) {
+            return parseFloat(price.replace(/[,$]/g, '')); // Remove '$' and ',' and parse as float
+        }
+
+        // Function to generate a random color for the lines
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        }
+
+        // Function to filter the data based on selected filters
+        function filterData() {
+            const apartmentFilter = $('#apartmentFilter').val();
+            const floorplanFilter = $('#floorplanFilter').val();
+
+            filteredData = latestData.filter(row => {
+                const apartmentMatch = apartmentFilter ? row.apartment === apartmentFilter : true;
+                const floorplanMatch = floorplanFilter ? row.floorplan === floorplanFilter : true;
+                return apartmentMatch && floorplanMatch;
+            });
+        }
+
+        // Function to update the chart based on the filtered data
+        function updateChart() {
+            const labels = Array.from(new Set(filteredData.map(row => row.hour.toLocaleString())));
+
+            // Group data by apartment, floor plan, and sqft
+            const filteredGroupedData = {};
+            filteredData.forEach(row => {
+                const key = `${row.apartment}-${row.floorplan}-${row.sqft}`;
+                if (!filteredGroupedData[key]) filteredGroupedData[key] = {};
+
+                if (!filteredGroupedData[key][row.hour]) {
+                    filteredGroupedData[key][row.hour] = [];
+                }
+
+                filteredGroupedData[key][row.hour].push(row.price);
+            });
+
+            // Prepare datasets for the chart
+            const datasets = [];
+            Object.keys(filteredGroupedData).forEach(key => {
+                const apartmentData = filteredGroupedData[key];
+                const color = getRandomColor();  // Get a random color for each line
+                const dataset = {
+                    label: key,  // Include apartment, floorplan, and sqft in the label
+                    data: labels.map(label => {
+                        const hour = new Date(label);
+                        const prices = apartmentData[hour] || [];
+                        const averagePrice = prices.length > 0 
+                            ? prices.reduce((sum, price) => sum + price, 0) / prices.length 
+                            : null;
+                        return averagePrice;
+                    }),
+                    borderColor: color,
+                    backgroundColor: color,
+                    borderWidth: 2,
+                    fill: false,
+                };
+                datasets.push(dataset);
+            });
+
+            // Initialize the chart
+            const ctx = document.getElementById('priceChart').getContext('2d');
+            if (window.priceChartInstance) {
+                window.priceChartInstance.destroy();
+            }
+
+            window.priceChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(tooltipItem) {
+                                    const dataset = tooltipItem.dataset;
+                                    const index = tooltipItem.dataIndex;
+                                    const label = dataset.label.split('-');  // Extract apartment, floorplan, sqft
+                                    const price = dataset.data[index];
+                                    return `${label[0]} | ${label[1]} | ${label[2]} sqft: $${price.toFixed(2)}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Hour'
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Price ($)'
+                            },
+                            suggestedMin: 0,  // Set a min value for the y-axis
+                            ticks: {
+                                callback: function(value) {
+                                    return '$' + value.toFixed(2);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+
+    <br>
+    <a href="index.html">Back to Home</a>
+</body>
+</html>
