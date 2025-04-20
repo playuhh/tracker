@@ -5,10 +5,8 @@ permissions:
 
 on:
   schedule:
-    # Run roughly every 8 hours, spaced irregularly to appear natural
-    - cron: "7 3 * * *"   # 03:07 UTC
-    - cron: "13 11 * * *" # 11:13 UTC
-    - cron: "28 20 * * *" # 20:28 UTC
+    # Run once per day at a random time (between 0:00 UTC and 23:59 UTC)
+    - cron: "0 0 * * *"  # Placeholder for the cron job, we’ll handle randomness in the script
   workflow_dispatch:  # Allows manual triggering
   pull_request:
     branches:
@@ -37,8 +35,16 @@ jobs:
         run: |
           python -m playwright install
 
-      - name: Run scraper
+      - name: Run scraper with random delay
         run: |
+          # Generate a random delay (between 0 and 86400 seconds = 24 hours)
+          random_delay=$((RANDOM % 86400))
+          echo "Random delay: $random_delay seconds"
+          
+          # Sleep for the random delay before scraping
+          sleep $random_delay
+
+          # Run the scraper script after the delay
           python scraper.py
 
       - name: Commit CSV to gh-pages
