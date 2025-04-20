@@ -18,7 +18,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: 3.13
+          python-version: 3.8
 
       - name: Install dependencies
         run: |
@@ -34,7 +34,7 @@ jobs:
           python scraper.py
 
       - name: Upload CSV file
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2  # Changed to v2
         with:
           name: unit_prices
           path: unit_prices.csv
