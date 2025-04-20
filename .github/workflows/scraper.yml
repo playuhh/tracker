@@ -1,5 +1,8 @@
 name: Periodic Apartment Scraper
 
+permissions:
+  contents: write  # Needed to push to gh-pages
+
 on:
   schedule:
     # Run roughly every 8 hours, spaced irregularly to appear natural
@@ -17,6 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Necessary for branch switching
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,23 +41,18 @@ jobs:
         run: |
           python scraper.py
 
-      - name: Configure Git for GitHub Pages
+      - name: Commit CSV to gh-pages
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-
-      - name: Create a new branch for Pages
-        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin gh-pages
           git checkout gh-pages || git checkout -b gh-pages
-          git pull origin gh-pages || echo "No previous content on gh-pages"
-
-      - name: Copy data to Pages branch
-        run: |
           cp data/unit_prices.csv .
           git add unit_prices.csv
-          git commit -m "Update unit prices"
+          git commit -m "Update unit prices" || echo "No changes to commit"
           git push origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload CSV file (Artifact)
         uses: actions/upload-artifact@v4
