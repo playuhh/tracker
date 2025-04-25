@@ -35,33 +35,24 @@ jobs:
         run: |
           python -m playwright install
 
-      - name: Run scraper with random delay
+      - name: Run scraper
         run: |
-          # Generate a random delay (between 0 and 86400 seconds = 24 hours)
-          random_delay=$((RANDOM % 86400))
-          echo "Random delay: $random_delay seconds"
-          
-          # Sleep for the random delay before scraping
-          sleep $random_delay
-
-          # Run the scraper script after the delay
           python scraper.py
 
-      - name: Commit CSV to gh-pages
+      - name: Commit CSV to current branch
         run: |
-          mkdir temp-gh-pages
-          cp data/unit_prices.csv temp-gh-pages/
+          # Ensure we're on the correct branch
+          git checkout $GITHUB_REF_NAME || git checkout -b $GITHUB_REF_NAME
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git fetch origin gh-pages
-          git checkout gh-pages || git checkout -b gh-pages
-          
-          cp temp-gh-pages/unit_prices.csv .
-          git add unit_prices.csv
+          # Add and commit the changes
+          git add data/unit_prices.csv
           git commit -m "Update unit prices" || echo "No changes to commit"
-          git push origin gh-pages --force
+          
+          # Push the changes to the current branch
+          git push origin $GITHUB_REF_NAME --force
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
