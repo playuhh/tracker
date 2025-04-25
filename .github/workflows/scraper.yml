@@ -1,3 +1,17 @@
+name: Periodic Apartment Scraper
+
+permissions:
+  contents: write  # Needed to push to gh-pages
+
+on:
+  schedule:
+    # Run once per day at a random time (between 0:00 UTC and 23:59 UTC)
+    - cron: "0 0 * * *"  # Placeholder for the cron job, we’ll handle randomness in the script
+  workflow_dispatch:  # Allows manual triggering
+  pull_request:
+    branches:
+      - main
+
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
