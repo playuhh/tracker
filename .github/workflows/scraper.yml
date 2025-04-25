@@ -1,13 +1,12 @@
 name: Periodic Apartment Scraper
 
 permissions:
-  contents: write  # Needed to push to gh-pages
+  contents: write  # Needed to commit CSV updates
 
 on:
   schedule:
-    # Run once per day at a random time (between 0:00 UTC and 23:59 UTC)
-    - cron: "0 0 * * *"  # Placeholder for the cron job, we’ll handle randomness in the script
-  workflow_dispatch:  # Allows manual triggering
+    - cron: "0 0 * * *"  # Run daily at midnight UTC
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -15,11 +14,12 @@ on:
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Necessary for branch switching
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,41 +31,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
 
-      - name: Install Playwright dependencies
+      - name: Install Playwright browser dependencies
         run: |
           python -m playwright install
 
       - name: Run scraper with random delay
         run: |
-          # Generate a random delay (between 0 and 86400 seconds = 24 hours)
           random_delay=$((RANDOM % 86400))
-          echo "Random delay: $random_delay seconds"
-          
-          # Sleep for the random delay before scraping
+          echo "Sleeping for $random_delay seconds"
           sleep $random_delay
-
-          # Run the scraper script after the delay
           python scraper.py
 
-      - name: Commit CSV to gh-pages
+      - name: Commit updated CSV if changed
         run: |
-          mkdir temp-gh-pages
-          cp data/unit_prices.csv temp-gh-pages/
-          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git fetch origin gh-pages
-          git checkout gh-pages || git checkout -b gh-pages
-          
-          cp temp-gh-pages/unit_prices.csv .
-          git add unit_prices.csv
-          git commit -m "Update unit prices" || echo "No changes to commit"
-          git push origin gh-pages --force
+
+          git add data/unit_prices.csv
+          git diff --cached --quiet || git commit -m "Append new unit prices"
+          git push origin main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload CSV file (Artifact)
+      - name: Upload CSV file as artifact
         uses: actions/upload-artifact@v4
         with:
           name: unit_prices
