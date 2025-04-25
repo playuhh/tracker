@@ -1,25 +1,11 @@
-name: Periodic Apartment Scraper
-
-permissions:
-  contents: write # Needed to commit CSV updates
-
-on:
-  schedule:
-    - cron: "0 0 * * *" # Run daily at midnight UTC
-  workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Necessary for branch switching
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,7 +17,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
 
-      - name: Install Playwright browser dependencies
+      - name: Install Playwright dependencies
         run: |
           python -m playwright install
 
@@ -39,23 +25,24 @@ jobs:
         run: |
           python scraper.py
 
-      - name: Commit updated CSV if changed
+      - name: Commit CSV to current branch
         run: |
+          # Ensure we're on the correct branch
+          git checkout $GITHUB_REF_NAME || git checkout -b $GITHUB_REF_NAME
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          current_branch="${GITHUB_REF#refs/heads/}"
-
-          git fetch origin "$current_branch"
-          git checkout "$current_branch"
-
+          
+          # Add and commit the changes
           git add data/unit_prices.csv
-          git diff --cached --quiet || git commit -m "Append new unit prices"
-          git push origin "$current_branch"
+          git commit -m "Update unit prices" || echo "No changes to commit"
+          
+          # Push the changes to the current branch
+          git push origin $GITHUB_REF_NAME --force
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload CSV file as artifact
+      - name: Upload CSV file (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: unit_prices
