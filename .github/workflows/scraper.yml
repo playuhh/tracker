@@ -35,11 +35,8 @@ jobs:
         run: |
           python -m playwright install
 
-      - name: Run scraper with random delay
+      - name: Run scraper
         run: |
-          random_delay=$((RANDOM % 86400))
-          echo "Sleeping for $random_delay seconds"
-          sleep $random_delay
           python scraper.py
 
       - name: Commit updated CSV if changed
