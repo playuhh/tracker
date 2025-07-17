@@ -2,3 +2,6 @@
 .venv
 
 full_units_page.*
+g.json
+
+__pycache__
