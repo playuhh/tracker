@@ -1,7 +1,6 @@
-.env
-.venv
+.venv/
+__pycache__/
+*.py[cod]
 
-full_units_page.*
+# Keep price history in Git so the scheduled cloud job has persistent state.
 g.json
-
-__pycache__

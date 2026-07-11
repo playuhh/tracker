@@ -1,15 +1,29 @@
-import gspread
+"""Optional Google Sheets output for apartment price snapshots."""
 
-gc = gspread.service_account(filename="g.json")
+from __future__ import annotations
 
-# Open the sheet
-sheet = gc.open("apt data").sheet1
-
-# Example: update cell A1
-print(sheet.get("A1"))
+import os
+from pathlib import Path
+from typing import Iterable
 
 
-def update_google_sheet(units):
+def update_google_sheet(units: Iterable[dict[str, str]]) -> bool:
+    """Append rows only when the required Google configuration is present."""
+    credentials = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+    sheet_name = os.getenv("GOOGLE_SHEET_NAME")
+    if not credentials or not sheet_name:
+        print(
+            "[INFO] Google Sheets export skipped. Set GOOGLE_SERVICE_ACCOUNT_FILE and "
+            "GOOGLE_SHEET_NAME to enable it."
+        )
+        return False
+
+    credentials_path = Path(credentials)
+    if not credentials_path.exists():
+        raise FileNotFoundError(f"Google service-account file not found: {credentials_path}")
+
+    import gspread
+
     rows = [
         [
             unit["timestamp"],
@@ -21,6 +35,10 @@ def update_google_sheet(units):
         ]
         for unit in units
     ]
+    if not rows:
+        return False
 
-    # Append rows to the sheet (at the bottom)
+    sheet = gspread.service_account(filename=str(credentials_path)).open(sheet_name).sheet1
     sheet.append_rows(rows, value_input_option="USER_ENTERED")
+    print(f"[INFO] Appended {len(rows)} rows to Google Sheet '{sheet_name}'.")
+    return True
