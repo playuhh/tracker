@@ -28,3 +28,8 @@ timestamp,apartment,floorplan,sqft,move_in,price
 2026-07-12T20:43:41+00:00,Building A,A1,767,Immediate,"$3,759"
 2026-07-12T20:43:41+00:00,Building A,B3,"1,117",Jul 16,"$5,329"
 2026-07-12T20:43:41+00:00,Building A,B2,"1,080",Immediate,"$5,167"
+2026-07-12T20:47:52+00:00,Building A,S3,618,Immediate,"$3,757"
+2026-07-12T20:47:52+00:00,Building A,A2,709,Jul 16,"$3,931"
+2026-07-12T20:47:52+00:00,Building A,A1,767,Immediate,"$3,759"
+2026-07-12T20:47:52+00:00,Building A,B3,"1,117",Jul 16,"$5,329"
+2026-07-12T20:47:52+00:00,Building A,B2,"1,080",Immediate,"$5,167"
