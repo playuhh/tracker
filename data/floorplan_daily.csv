@@ -1,1 +1,6 @@
 timestamp,apartment,floorplan,floorplan_id,sqft,visible_units,min_rent,median_rent,max_rent,min_rent_per_sqft,median_rent_per_sqft,max_rent_per_sqft,newly_visible_units,price_reductions,earliest_move_in
+2026-07-12T21:24:20+00:00,Building A,layout-abdbc2b5,layout-id-0e981ccc,1080,5,"$5,167","$5,256","$5,395",$4.78,$4.87,$5.00,0,0,Immediate
+2026-07-12T21:24:20+00:00,Building A,layout-44d6a8a7,layout-id-9d709221,618,2,"$3,757","$3,841","$3,925",$6.08,$6.21,$6.35,0,0,Immediate
+2026-07-12T21:24:20+00:00,Building A,layout-16a36e86,layout-id-af1e9cfa,767,6,"$3,759","$3,935.50","$4,017",$4.90,$5.13,$5.24,0,0,Immediate
+2026-07-12T21:24:20+00:00,Building A,layout-c8361f9b,layout-id-af2a3fbd,709,2,"$3,931","$3,975","$4,019",$5.54,$5.60,$5.67,0,0,Jul 16
+2026-07-12T21:24:20+00:00,Building A,layout-0cd20d37,layout-id-fd556c01,1117,1,"$5,329","$5,329","$5,329",$4.77,$4.77,$4.77,0,0,Jul 16
