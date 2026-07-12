@@ -97,6 +97,7 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertIn('id="plan-selector"', report)
         self.assertIn("Floor-plan value comparison", report)
         self.assertIn("Layout 1", report)
+        self.assertIn("Collecting history (3/7 days)", report)
         self.assertIn("How to use this", report)
         self.assertNotIn("UNIT-0704", report)
 
