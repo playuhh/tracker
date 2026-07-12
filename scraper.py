@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import os
 import re
 import time
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -17,9 +20,10 @@ from urllib.request import Request, urlopen
 from g import update_google_sheet
 from report import generate_report
 
-APARTMENTS = {"Building A": "private-page-id"}
+BUILDING_PAGE_ID = os.environ.get("RENTAL_BUILDING_PAGE_ID", "")
+APARTMENTS = {"Building A": BUILDING_PAGE_ID} if BUILDING_PAGE_ID else {}
 AJAX_URL = "https://verisresidential.com/wp-admin/admin-ajax.php"
-USER_AGENT = "BuildingPriceTracker/1.0 (+https://github.com/account/tracker)"
+USER_AGENT = "RentalMarketTracker/1.0"
 REQUEST_TIMEOUT_SECONDS = 15
 REQUEST_ATTEMPTS = 3
 
@@ -36,6 +40,26 @@ UNIT_CSV_FIELDS = [
     "move_in",
     "price",
 ]
+FLOORPLAN_DAILY_FILE = Path("data/floorplan_daily.csv")
+FLOORPLAN_DAILY_FIELDS = [
+    "timestamp",
+    "apartment",
+    "floorplan",
+    "floorplan_id",
+    "sqft",
+    "visible_units",
+    "min_rent",
+    "median_rent",
+    "max_rent",
+    "min_rent_per_sqft",
+    "median_rent_per_sqft",
+    "max_rent_per_sqft",
+    "newly_visible_units",
+    "price_reductions",
+    "earliest_move_in",
+]
+SCRAPE_RUNS_FILE = Path("data/scrape_runs.csv")
+SCRAPE_RUNS_FIELDS = ["timestamp", "apartment", "status", "floorplan_count", "unit_count"]
 REPORT_FILE = Path("data/report.html")
 PRICE_PATTERN = re.compile(r"^\$?[\d,]+(?:\.\d{1,2})?$")
 
@@ -48,6 +72,35 @@ def price_to_cents(price: str) -> int:
     """Convert a displayed dollar amount into cents for reliable comparisons."""
     digits = price.replace("$", "").replace(",", "")
     return int(round(float(digits) * 100))
+
+
+def opaque_label(kind: str, source_value: str) -> str:
+    """Return a stable public label without publishing an inventory identifier."""
+    digest = hashlib.sha256(source_value.encode("utf-8")).hexdigest()[:8]
+    return f"{kind}-{digest}"
+
+
+def anonymize_snapshot_rows(
+    floorplans: Iterable[dict[str, str]], unit_details: Iterable[dict[str, str]]
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Remove property, layout, and listing labels before persistence or publication."""
+    floorplans = [dict(row) for row in floorplans]
+    unit_details = [dict(row) for row in unit_details]
+    layout_map: dict[str, tuple[str, str]] = {}
+    for row in floorplans:
+        source_id, source_name = row["floorplan_id"], row["floorplan"]
+        layout_map[source_id] = (opaque_label("layout", source_name), opaque_label("layout-id", source_id))
+        row["apartment"] = "Building A"
+        row["floorplan"], row["floorplan_id"] = layout_map[source_id]
+    for row in unit_details:
+        source_id, source_name = row["floorplan_id"], row["floorplan"]
+        layout = layout_map.get(
+            source_id, (opaque_label("layout", source_name), opaque_label("layout-id", source_id))
+        )
+        row["apartment"] = "Building A"
+        row["floorplan"], row["floorplan_id"] = layout
+        row["unit_id"] = opaque_label("listing", row["unit_id"])
+    return floorplans, unit_details
 
 
 def format_price(value: Any) -> str:
@@ -254,6 +307,7 @@ def scrape_apartment(
         f"[INFO] Found {len(floorplans)} floor plans and {len(unit_details)} individual units "
         f"for {apartment}."
     )
+    floorplans, unit_details = anonymize_snapshot_rows(floorplans, unit_details)
     return (
         [{field: floorplan[field] for field in CSV_FIELDS} for floorplan in floorplans],
         unit_details,
@@ -261,6 +315,8 @@ def scrape_apartment(
 
 
 def scrape_all() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    if not APARTMENTS:
+        raise RuntimeError("Set RENTAL_BUILDING_PAGE_ID before collecting inventory")
     units: list[dict[str, str]] = []
     unit_details: list[dict[str, str]] = []
     for apartment, page_id in APARTMENTS.items():
@@ -278,6 +334,14 @@ def load_latest_prices(filename: Path) -> dict[tuple[str, str], dict[str, str]]:
         for row in csv.DictReader(file):
             latest[(row["apartment"], row["floorplan"])] = row
     return latest
+
+
+def read_rows_csv(filename: Path) -> list[dict[str, str]]:
+    """Read append-only history, returning no rows before its first run."""
+    if not filename.exists():
+        return []
+    with filename.open(newline="", encoding="utf-8") as file:
+        return list(csv.DictReader(file))
 
 
 def describe_price_changes(
@@ -302,6 +366,159 @@ def describe_price_changes(
     return changes
 
 
+def parse_sqft(value: str) -> int | None:
+    """Return a positive square-footage value, if the public response supplies one."""
+    try:
+        sqft = int(value.replace(",", "").strip())
+    except (AttributeError, ValueError):
+        return None
+    return sqft if sqft > 0 else None
+
+
+def median_cents(values: Iterable[int]) -> int:
+    """Return the integer-cent median without introducing floating-point money values."""
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("Cannot calculate a median from no values")
+    middle = len(ordered) // 2
+    return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) // 2
+
+
+def format_cents(cents: int) -> str:
+    return f"${cents / 100:,.0f}" if cents % 100 == 0 else f"${cents / 100:,.2f}"
+
+
+def format_rent_per_sqft(cents_per_sqft: int | None) -> str:
+    return "" if cents_per_sqft is None else f"${cents_per_sqft / 100:,.2f}"
+
+
+def move_in_sort_key(value: str) -> tuple[int, str]:
+    """Sort Immediate before dated availability, retaining unparseable values safely."""
+    if value.casefold() in {"immediate", "now"}:
+        return (0, "")
+    for pattern in ("%b %d", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(value, pattern)
+            return (1, parsed.strftime("%m%d"))
+        except ValueError:
+            pass
+    return (2, value)
+
+
+def latest_snapshot_rows_before(
+    rows: Iterable[dict[str, str]], apartment: str, timestamp: str
+) -> list[dict[str, str]]:
+    """Return the latest known unit snapshot before a run for one apartment."""
+    candidates = [row for row in rows if row["apartment"] == apartment and row["timestamp"] < timestamp]
+    if not candidates:
+        return []
+    latest = max(row["timestamp"] for row in candidates)
+    return [row for row in candidates if row["timestamp"] == latest]
+
+
+def floorplan_daily_rows(
+    current_units: Iterable[dict[str, str]], previous_units: Iterable[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Aggregate one complete unit snapshot into renter-facing floor-plan metrics.
+
+    ``previous_units`` is append-only unit history from before this complete
+    run.  Missing units are deliberately not converted to lease events.
+    """
+    current_units = list(current_units)
+    previous_units = list(previous_units)
+    groups: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    for unit in current_units:
+        groups[(unit["apartment"], unit["floorplan_id"])].append(unit)
+
+    aggregates: list[dict[str, str]] = []
+    for (apartment, floorplan_id), units in sorted(groups.items()):
+        timestamp = units[0]["timestamp"]
+        previous_snapshot = latest_snapshot_rows_before(previous_units, apartment, timestamp)
+        previous_by_identity: dict[tuple[str, str, str], dict[str, str]] = {
+            (row["apartment"], row["floorplan_id"], row["unit_id"]): row
+            for row in previous_snapshot
+        }
+        latest_observation_by_identity: dict[tuple[str, str, str], dict[str, str]] = {}
+        for row in previous_units:
+            identity = (row["apartment"], row["floorplan_id"], row["unit_id"])
+            if row["apartment"] != apartment or row["timestamp"] >= timestamp:
+                continue
+            if identity not in latest_observation_by_identity or (
+                row["timestamp"] > latest_observation_by_identity[identity]["timestamp"]
+            ):
+                latest_observation_by_identity[identity] = row
+        rents = [price_to_cents(unit["price"]) for unit in units]
+        rent_per_sqft = [
+            (price_to_cents(unit["price"]) + sqft // 2) // sqft
+            for unit in units
+            if (sqft := parse_sqft(unit["sqft"])) is not None
+        ]
+        newly_visible = 0
+        reductions = 0
+        for unit in units:
+            previous = previous_by_identity.get(
+                (unit["apartment"], unit["floorplan_id"], unit["unit_id"])
+            )
+            if previous is None:
+                newly_visible += 1
+            prior_observation = latest_observation_by_identity.get(
+                (unit["apartment"], unit["floorplan_id"], unit["unit_id"])
+            )
+            if prior_observation and price_to_cents(unit["price"]) < price_to_cents(prior_observation["price"]):
+                reductions += 1
+        aggregates.append(
+            {
+                "timestamp": timestamp,
+                "apartment": apartment,
+                "floorplan": units[0]["floorplan"],
+                "floorplan_id": floorplan_id,
+                "sqft": units[0]["sqft"],
+                "visible_units": str(len(units)),
+                "min_rent": format_cents(min(rents)),
+                "median_rent": format_cents(median_cents(rents)),
+                "max_rent": format_cents(max(rents)),
+                "min_rent_per_sqft": format_rent_per_sqft(min(rent_per_sqft)) if rent_per_sqft else "",
+                "median_rent_per_sqft": format_rent_per_sqft(median_cents(rent_per_sqft)) if rent_per_sqft else "",
+                "max_rent_per_sqft": format_rent_per_sqft(max(rent_per_sqft)) if rent_per_sqft else "",
+                "newly_visible_units": str(newly_visible),
+                "price_reductions": str(reductions),
+                "earliest_move_in": min((unit["move_in"] for unit in units), key=move_in_sort_key),
+            }
+        )
+    return aggregates
+
+
+def scrape_run_rows(
+    floorplans: Iterable[dict[str, str]], unit_details: Iterable[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Record coverage only after all floor-plan detail responses validated."""
+    floorplans = list(floorplans)
+    unit_details = list(unit_details)
+    by_apartment: dict[str, dict[str, str | int]] = {}
+    for row in floorplans:
+        record = by_apartment.setdefault(
+            row["apartment"],
+            {"timestamp": row["timestamp"], "floorplan_count": 0, "unit_count": 0},
+        )
+        record["floorplan_count"] = int(record["floorplan_count"]) + 1
+    for row in unit_details:
+        record = by_apartment.setdefault(
+            row["apartment"],
+            {"timestamp": row["timestamp"], "floorplan_count": 0, "unit_count": 0},
+        )
+        record["unit_count"] = int(record["unit_count"]) + 1
+    return [
+        {
+            "timestamp": str(record["timestamp"]),
+            "apartment": apartment,
+            "status": "complete",
+            "floorplan_count": str(record["floorplan_count"]),
+            "unit_count": str(record["unit_count"]),
+        }
+        for apartment, record in sorted(by_apartment.items())
+    ]
+
+
 def save_rows_csv(rows: Iterable[dict[str, str]], filename: Path, fieldnames: list[str]) -> None:
     rows = list(rows)
     filename.parent.mkdir(parents=True, exist_ok=True)
@@ -314,14 +531,44 @@ def save_rows_csv(rows: Iterable[dict[str, str]], filename: Path, fieldnames: li
     print(f"[INFO] Saved {len(rows)} snapshots to {filename}.")
 
 
+def anonymize_history_file(filename: Path, fieldnames: list[str]) -> None:
+    """Pseudonymize legacy snapshots in place before the repository is published."""
+    rows = read_rows_csv(filename)
+    if not rows:
+        return
+    for row in rows:
+        if "apartment" in row:
+            row["apartment"] = "Building A"
+        if row.get("floorplan") and not row["floorplan"].startswith("layout-"):
+            row["floorplan"] = opaque_label("layout", row["floorplan"])
+        if row.get("floorplan_id") and not row["floorplan_id"].startswith("layout-id-"):
+            row["floorplan_id"] = opaque_label("layout-id", row["floorplan_id"])
+        if row.get("unit_id") and not row["unit_id"].startswith("listing-"):
+            row["unit_id"] = opaque_label("listing", row["unit_id"])
+    with filename.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[INFO] Anonymized {len(rows)} rows in {filename}.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Print results without saving them.")
     parser.add_argument("--no-sheets", action="store_true", help="Skip the optional Google Sheets export.")
     parser.add_argument("--report-only", action="store_true", help="Rebuild the local report without scraping.")
+    parser.add_argument("--anonymize-history", action="store_true", help="Pseudonymize retained history and rebuild the report.")
     args = parser.parse_args()
+    if args.anonymize_history:
+        anonymize_history_file(CSV_FILE, CSV_FIELDS)
+        anonymize_history_file(UNIT_CSV_FILE, UNIT_CSV_FIELDS)
+        anonymize_history_file(FLOORPLAN_DAILY_FILE, FLOORPLAN_DAILY_FIELDS)
+        anonymize_history_file(SCRAPE_RUNS_FILE, SCRAPE_RUNS_FIELDS)
+        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE)
+        print(f"[INFO] Updated anonymized report at {REPORT_FILE}.")
+        return
     if args.report_only:
-        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE)
+        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE)
         print(f"[INFO] Updated local report at {REPORT_FILE}.")
         return
 
@@ -339,9 +586,14 @@ def main() -> None:
     if args.dry_run:
         return
 
+    previous_unit_details = read_rows_csv(UNIT_CSV_FILE)
+    daily_rows = floorplan_daily_rows(unit_details, previous_unit_details)
+    runs = scrape_run_rows(units, unit_details)
     save_rows_csv(units, CSV_FILE, CSV_FIELDS)
     save_rows_csv(unit_details, UNIT_CSV_FILE, UNIT_CSV_FIELDS)
-    generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE)
+    save_rows_csv(daily_rows, FLOORPLAN_DAILY_FILE, FLOORPLAN_DAILY_FIELDS)
+    save_rows_csv(runs, SCRAPE_RUNS_FILE, SCRAPE_RUNS_FIELDS)
+    generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE)
     print(f"[INFO] Updated local report at {REPORT_FILE}.")
     if not args.no_sheets:
         update_google_sheet(units)

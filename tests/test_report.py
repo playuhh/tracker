@@ -82,7 +82,7 @@ class UnitHistoryTest(unittest.TestCase):
             [point["gap_before"] for point in cap_0704["points"]], [False, False, True]
         )
 
-    def test_generated_report_contains_explorer_and_current_delta(self):
+    def test_generated_report_is_layout_first_and_omits_listing_identifiers(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             unit_file = directory / "unit_snapshots.csv"
@@ -94,12 +94,11 @@ class UnitHistoryTest(unittest.TestCase):
             generate_report(floorplan_file, unit_file, output_file)
             report = output_file.read_text(encoding="utf-8")
 
-        self.assertIn('id="floorplan-filter"', report)
-        self.assertIn('id="unit-selector"', report)
-        self.assertIn("Change since first", report)
-        self.assertIn('"gap_before":true', report)
-        self.assertIn("UNIT-0704", report)
-        self.assertIn("-$50", report)
+        self.assertIn('id="plan-selector"', report)
+        self.assertIn("Floor-plan value comparison", report)
+        self.assertIn("Layout 1", report)
+        self.assertIn("How to use this", report)
+        self.assertNotIn("UNIT-0704", report)
 
     @staticmethod
     def write_csv(path, rows):

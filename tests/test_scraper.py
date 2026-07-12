@@ -5,10 +5,13 @@ from pathlib import Path
 
 from scraper import (
     describe_price_changes,
+    floorplan_daily_rows,
     format_availability_date,
+    median_cents,
     parse_floorplan_response,
     parse_overview_response,
     price_to_cents,
+    scrape_run_rows,
     scrape_apartment,
 )
 from report import sparkline
@@ -22,6 +25,37 @@ def load_fixture(name: str) -> dict:
 
 
 class ScraperHelpersTest(unittest.TestCase):
+    def test_median_cents_handles_odd_and_even_prices_without_float_money(self):
+        self.assertEqual(median_cents([100, 300, 200]), 200)
+        self.assertEqual(median_cents([100, 200]), 150)
+
+    def test_floorplan_daily_aggregates_inventory_new_units_reductions_and_missing_sqft(self):
+        previous = [
+            {"timestamp": "2026-07-10T00:00:00+00:00", "apartment": "Building A", "floorplan": "A1", "floorplan_id": "a1", "unit_id": "101", "sqft": "700", "move_in": "Immediate", "price": "$3,500"},
+            {"timestamp": "2026-07-10T00:00:00+00:00", "apartment": "Building A", "floorplan": "A1", "floorplan_id": "a1", "unit_id": "102", "sqft": "0", "move_in": "Jul 20", "price": "$3,800"},
+        ]
+        current = [
+            {**previous[0], "timestamp": "2026-07-11T00:00:00+00:00", "price": "$3,450"},
+            {**previous[1], "timestamp": "2026-07-11T00:00:00+00:00"},
+            {**previous[0], "timestamp": "2026-07-11T00:00:00+00:00", "unit_id": "103", "price": "$3,600"},
+        ]
+        row = floorplan_daily_rows(current, previous)[0]
+        self.assertEqual(row["visible_units"], "3")
+        self.assertEqual(row["min_rent"], "$3,450")
+        self.assertEqual(row["median_rent"], "$3,600")
+        self.assertEqual(row["newly_visible_units"], "1")
+        self.assertEqual(row["price_reductions"], "1")
+        self.assertEqual(row["min_rent_per_sqft"], "$4.93")
+
+    def test_complete_run_record_is_created_only_from_validated_snapshot_data(self):
+        floorplans = [{"timestamp": TIMESTAMP, "apartment": "Building A", "floorplan": "A1"}]
+        details = [{"timestamp": TIMESTAMP, "apartment": "Building A", "unit_id": "101"}]
+        self.assertEqual(
+            scrape_run_rows(floorplans, details),
+            [{"timestamp": TIMESTAMP, "apartment": "Building A", "status": "complete",
+              "floorplan_count": "1", "unit_count": "1"}],
+        )
+
     def test_price_to_cents(self):
         self.assertEqual(price_to_cents("$3,757"), 375700)
         self.assertEqual(price_to_cents("$3,757.50"), 375750)
@@ -93,6 +127,19 @@ class ScraperHelpersTest(unittest.TestCase):
         overview["apt_count"] = "3"
         with self.assertRaisesRegex(RuntimeError, "Overview reports 3 available units"):
             scrape_apartment("Building A", "private-page-id", post)
+
+    def test_completed_scrape_pseudonymizes_layout_and_listing_identifiers(self):
+        overview = load_fixture("overview_response.json")
+        detail = load_fixture("floorplan_s3_response.json")
+
+        def post(request: dict[str, str]) -> dict:
+            return overview if request["action"] == "omg_apt_search_main_query" else detail
+
+        floorplans, units = scrape_apartment("Building A", "private-page-id", post)
+        self.assertTrue(floorplans[0]["floorplan"].startswith("layout-"))
+        self.assertTrue(units[0]["floorplan_id"].startswith("layout-id-"))
+        self.assertTrue(units[0]["unit_id"].startswith("listing-"))
+        self.assertNotIn("UNIT-0704", units[0].values())
 
     def test_describe_price_changes(self):
         previous = {

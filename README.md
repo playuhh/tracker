@@ -1,30 +1,39 @@
 # Apartment Price Tracker
 
-Tracks advertised prices at Anonymous building and saves each run as
-a CSV snapshot. The scheduled collector uses direct, public inventory requests;
+Tracks advertised rental-market prices and saves each run as a CSV snapshot.
+Published history uses stable pseudonyms for the building, layouts, and listings.
+The scheduled collector uses direct, public inventory requests;
 it does not launch a browser or install Chromium.
 
 The tracker records:
 
 - floor plan, square footage, move-in date, and advertised starting rent
-- individual unit number, rent, availability date, and floor-plan ID
+- anonymized listing key, rent, availability date, and anonymized layout ID
 - UTC snapshot timestamp
 
 ## Setup
 
 The core tracker has no third-party Python dependencies.
 
+Set the target building's page ID locally; do not commit it:
+
 ```bash
+export RENTAL_BUILDING_PAGE_ID="private-page-id"
 python3 -m venv .venv
 .venv/bin/python scraper.py --no-sheets
 ```
 
-Each run updates three local files:
+Each complete run updates five local files:
 
 - `data/unit_prices.csv`: floor-plan price history
-- `data/unit_snapshots.csv`: individual-unit history, including room numbers such as `UNIT-0704`
-- `data/report.html`: a local dashboard with floor-plan sparklines, a filterable
-  unit-level price-history chart, and a sortable current-unit table
+- `data/unit_snapshots.csv`: anonymized individual-listing history, retained only
+  to calculate aggregate inventory and price movement
+- `data/floorplan_daily.csv`: daily floor-plan inventory, min/median/max asking
+  rent, rent per square foot, newly visible units, and price reductions
+- `data/scrape_runs.csv`: complete collection-run coverage, used to distinguish
+  an absent advertisement from a failed or partial scrape
+- `data/report.html`: an anonymous layout market dashboard with inventory, asking-rent,
+  rent-per-square-foot, and renter-timing signals; it never publishes individual listings
 
 On later runs, the terminal reports every floor-plan price increase or decrease
 compared with the last saved price. Open the dashboard after a run:
@@ -57,22 +66,24 @@ export GOOGLE_SHEET_NAME="apt data"
 .venv/bin/python scraper.py
 ```
 
-Credentials are excluded from Git. Price history is committed by the remote
-tracker so its trend data persists between runs.
+Credentials are excluded from Git. Price history and derived daily aggregates
+are committed by the remote tracker so renter-facing trends persist between runs.
 
 ## Remote daily tracking
 
 GitHub Actions runs the standard-library collector every day at `13:00 UTC`
 (9 AM during Toronto daylight time, 8 AM during standard time). It commits the
-two CSV histories and regenerated report back to the repository, then deploys
+anonymized histories, derived aggregates, and regenerated report back to the repository, then deploys
 the report to GitHub Pages.
 
 Before the first remote run, push the repository changes to GitHub and enable
-**Settings -> Pages -> Source: GitHub Actions** in the GitHub repository. The
-report will then be published at:
+**Settings -> Pages -> Source: GitHub Actions** in the GitHub repository. Also
+add the page ID as the repository
+secret `RENTAL_BUILDING_PAGE_ID`; without it, the collector intentionally stops
+instead of exposing or guessing a building target.
 
 ```text
-https://account.github.io/tracker/
+https://<account>.github.io/<repository>/
 ```
 
 You can run it immediately from GitHub: **Actions -> Apartment Price Tracker
@@ -88,7 +99,7 @@ that does not match the overview. This protects the historical data from empty
 or partial runs.
 
 If that happens, use a browser manually to inspect network activity on the
-Building availability page. Find the public `admin-ajax.php` request with
+availability page. Find the public `admin-ajax.php` request with
 `action=omg_apt_search_main_query`, then the `floorplan_query` detail requests.
 Update the fixtures and parser only after confirming the new public response
 shape. The browser is a discovery and debugging tool, not part of the scheduled

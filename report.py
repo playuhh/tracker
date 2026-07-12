@@ -1,4 +1,4 @@
-"""Generate a self-contained local price-trend report from tracker snapshots."""
+"""Generate a self-contained renter-facing market report from CSV snapshots."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import csv
 import html
 import json
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 from typing import Iterable
 
 
@@ -24,29 +26,47 @@ def price_to_cents(price: str) -> int:
     return int(round(float(price.replace("$", "").replace(",", "")) * 100))
 
 
-def format_cents(cents: int, include_sign: bool = False) -> str:
+def format_cents(cents: int | None, include_sign: bool = False) -> str:
+    if cents is None:
+        return "—"
     sign = "+" if include_sign and cents > 0 else "-" if cents < 0 else ""
     return f"{sign}${abs(cents) / 100:,.0f}"
 
 
+def int_value(value: str, default: int = 0) -> int:
+    try:
+        return int(value.replace(",", ""))
+    except (AttributeError, ValueError):
+        return default
+
+
+def move_in_sort_key(value: str) -> tuple[int, str]:
+    if value.casefold() in {"immediate", "now"}:
+        return (0, "")
+    for pattern in ("%b %d", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return (1, datetime.strptime(value, pattern).strftime("%m%d"))
+        except ValueError:
+            pass
+    return (2, value)
+
+
 def unit_identity(row: dict[str, str]) -> UnitKey:
-    """Return the durable identity for an advertised unit."""
     return (row["apartment"], row["floorplan_id"], row["unit_id"])
 
 
 def current_snapshot_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
-    """Return rows from the most recent scrape for each apartment."""
+    """Return the most recent observation per apartment (legacy-history fallback)."""
     rows = list(rows)
     latest_by_apartment: dict[str, str] = {}
     for row in rows:
         apartment = row["apartment"]
-        if apartment not in latest_by_apartment or row["timestamp"] > latest_by_apartment[apartment]:
+        if row["timestamp"] > latest_by_apartment.get(apartment, ""):
             latest_by_apartment[apartment] = row["timestamp"]
     return [row for row in rows if row["timestamp"] == latest_by_apartment[row["apartment"]]]
 
 
 def group_unit_history(rows: Iterable[dict[str, str]]) -> dict[UnitKey, list[dict[str, str]]]:
-    """Group unit snapshots by identity, ordered by observation time."""
     grouped: dict[UnitKey, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
         grouped[unit_identity(row)].append(row)
@@ -58,12 +78,6 @@ def group_unit_history(rows: Iterable[dict[str, str]]) -> dict[UnitKey, list[dic
 def apartment_snapshot_times(
     floorplan_rows: Iterable[dict[str, str]], unit_rows: Iterable[dict[str, str]]
 ) -> dict[str, list[str]]:
-    """Return known collector timestamps by apartment.
-
-    Floor-plan rows are included because a scrape can succeed even when there
-    are no advertised units.  Those timestamps let the report distinguish a
-    genuine disappearance/reappearance from two adjacent observations.
-    """
     timestamps: dict[str, set[str]] = defaultdict(set)
     for row in [*floorplan_rows, *unit_rows]:
         timestamps[row["apartment"]].add(row["timestamp"])
@@ -71,241 +85,195 @@ def apartment_snapshot_times(
 
 
 def unit_summary(rows: list[dict[str, str]]) -> dict[str, int | str | None]:
-    """Calculate the first/latest price information for one sorted unit history."""
     if not rows:
-        return {
-            "first_timestamp": None,
-            "latest_timestamp": None,
-            "first_price": None,
-            "latest_price": None,
-            "change_cents": None,
-            "change_percent": None,
-            "snapshot_count": 0,
-        }
-    first_price = price_to_cents(rows[0]["price"])
-    latest_price = price_to_cents(rows[-1]["price"])
-    change_cents = latest_price - first_price
-    return {
-        "first_timestamp": rows[0]["timestamp"],
-        "latest_timestamp": rows[-1]["timestamp"],
-        "first_price": first_price,
-        "latest_price": latest_price,
-        "change_cents": change_cents,
-        "change_percent": (change_cents / first_price * 100) if first_price else None,
-        "snapshot_count": len(rows),
-    }
+        return {"first_timestamp": None, "latest_timestamp": None, "first_price": None,
+                "latest_price": None, "change_cents": None, "change_percent": None,
+                "snapshot_count": 0}
+    first_price, latest_price = price_to_cents(rows[0]["price"]), price_to_cents(rows[-1]["price"])
+    change = latest_price - first_price
+    return {"first_timestamp": rows[0]["timestamp"], "latest_timestamp": rows[-1]["timestamp"],
+            "first_price": first_price, "latest_price": latest_price, "change_cents": change,
+            "change_percent": change / first_price * 100 if first_price else None,
+            "snapshot_count": len(rows)}
 
 
 def unit_history_data(
     grouped_rows: dict[UnitKey, list[dict[str, str]]],
     timestamps_by_apartment: dict[str, list[str]],
+    current_keys: set[UnitKey] | None = None,
 ) -> list[dict[str, object]]:
-    """Create compact, JSON-safe data for the selected-unit dashboard.
-
-    ``gap_before`` marks an observation that follows at least one known scrape
-    during which the unit was absent.  The browser uses it to start a new SVG
-    line segment instead of joining the two advertised periods.
-    """
+    """Create JSON-safe data and preserve gaps between advertised periods."""
     histories: list[dict[str, object]] = []
     for key, rows in sorted(grouped_rows.items()):
         apartment, floorplan_id, unit_id = key
         timestamps = timestamps_by_apartment.get(apartment, [])
-        points = []
         previous_timestamp: str | None = None
+        points = []
         for row in rows:
-            gap_before = bool(
-                previous_timestamp
-                and any(previous_timestamp < timestamp < row["timestamp"] for timestamp in timestamps)
-            )
-            points.append(
-                {
-                    "timestamp": row["timestamp"],
-                    "price": price_to_cents(row["price"]),
-                    "gap_before": gap_before,
-                }
-            )
+            points.append({"timestamp": row["timestamp"], "price": price_to_cents(row["price"]),
+                           "gap_before": bool(previous_timestamp and any(
+                               previous_timestamp < known < row["timestamp"] for known in timestamps))})
             previous_timestamp = row["timestamp"]
-        summary = unit_summary(rows)
-        histories.append(
-            {
-                "key": "\u001f".join(key),
-                "apartment": apartment,
-                "floorplan": rows[-1]["floorplan"],
-                "floorplan_id": floorplan_id,
-                "unit_id": unit_id,
-                "points": points,
-                **summary,
-            }
-        )
+        histories.append({"key": "\u001f".join(key), "apartment": apartment,
+                          "floorplan": rows[-1]["floorplan"], "floorplan_id": floorplan_id,
+                          "unit_id": unit_id, "move_in": rows[-1]["move_in"], "points": points,
+                          "currently_advertised": key in current_keys if current_keys is not None else True,
+                          **unit_summary(rows)})
     return histories
 
 
 def sparkline(prices: list[int]) -> str:
-    width, height, padding = 180, 48, 5
+    """Small server-rendered trend, including a visible flat line and marker."""
     if not prices:
         return ""
+    width, height, padding = 180, 48, 5
     low, high = min(prices), max(prices)
-    span = max(high - low, 1)
     points = []
     for index, price in enumerate(prices):
         x = padding if len(prices) == 1 else padding + index * (width - 2 * padding) / (len(prices) - 1)
-        y = height / 2 if high == low else height - padding - (price - low) * (height - 2 * padding) / span
+        y = height / 2 if high == low else height - padding - (price - low) * (height - 2 * padding) / (high - low)
         points.append(f"{x:.1f},{y:.1f}")
-    return (
-        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="price trend">'
-        f'<polyline points="{" ".join(points)}" fill="none" stroke="#9a4e10" '
-        'stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>'
-        f'<circle cx="{points[-1].split(",")[0]}" cy="{points[-1].split(",")[1]}" r="3" fill="#9a4e10"/>'
-        "</svg>"
-    )
+    return (f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="rent trend">'
+            f'<polyline points="{" ".join(points)}" fill="none" stroke="#9a4e10" stroke-width="2.5"/>'
+            f'<circle cx="{points[-1].split(",")[0]}" cy="{points[-1].split(",")[1]}" r="3" fill="#9a4e10"/></svg>')
 
 
 def json_for_script(value: object) -> str:
-    """Serialize report data without allowing a snapshot field to end a script tag."""
     return json.dumps(value, separators=(",", ":")).replace("</", "<\\/")
 
 
+def parsed_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def window_change(rows: list[dict[str, object]], field: str, days: int) -> int | None:
+    """Change only when coverage reaches the named daily-history window."""
+    if len(rows) < days:
+        return None
+    latest = rows[-1]
+    cutoff = parsed_timestamp(str(latest["timestamp"])) - timedelta(days=days)
+    eligible = [row for row in rows if parsed_timestamp(str(row["timestamp"])) <= cutoff]
+    if not eligible:
+        return None
+    return int(latest[field]) - int(eligible[-1][field])
+
+
+def successful_times(runs: list[dict[str, str]], fallback_rows: Iterable[dict[str, str]]) -> dict[str, list[str]]:
+    known: dict[str, set[str]] = defaultdict(set)
+    for row in runs:
+        if row.get("status") == "complete":
+            known[row["apartment"]].add(row["timestamp"])
+    if known:
+        return {apartment: sorted(times) for apartment, times in known.items()}
+    # Pre-coverage histories were only written after a successful collector run.
+    for row in fallback_rows:
+        known[row["apartment"]].add(row["timestamp"])
+    return {apartment: sorted(times) for apartment, times in known.items()}
+
+
+def fallback_daily_rows(unit_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Render old repositories gracefully until the next collector creates aggregates."""
+    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in unit_rows:
+        grouped[(row["timestamp"], row["apartment"], row["floorplan_id"])].append(row)
+    result = []
+    for (timestamp, apartment, floorplan_id), rows in grouped.items():
+        rents = sorted(price_to_cents(row["price"]) for row in rows)
+        psf = [(price_to_cents(row["price"]) + int_value(row["sqft"]) // 2) // int_value(row["sqft"]) for row in rows if int_value(row["sqft"]) > 0]
+        result.append({"timestamp": timestamp, "apartment": apartment, "floorplan": rows[0]["floorplan"],
+                       "floorplan_id": floorplan_id, "sqft": rows[0]["sqft"], "visible_units": str(len(rows)),
+                       "min_rent": format_cents(rents[0]), "median_rent": format_cents(int(median(rents))),
+                       "max_rent": format_cents(rents[-1]),
+                       "min_rent_per_sqft": f"${min(psf) / 100:.2f}" if psf else "",
+                       "median_rent_per_sqft": f"${int(median(psf)) / 100:.2f}" if psf else "",
+                       "max_rent_per_sqft": f"${max(psf) / 100:.2f}" if psf else "",
+                       "newly_visible_units": "0", "price_reductions": "0",
+                       "earliest_move_in": min((row["move_in"] for row in rows), key=move_in_sort_key)})
+    return result
+
+
 def generate_report(
-    floorplan_file: Path,
-    unit_file: Path,
-    output_file: Path,
+    floorplan_file: Path, unit_file: Path, output_file: Path,
+    daily_file: Path | None = None, runs_file: Path | None = None,
 ) -> None:
-    floorplan_history = read_rows(floorplan_file)
-    unit_history = read_rows(unit_file)
+    """Build the floor-plan-first dashboard; raw snapshots remain authoritative."""
+    floorplan_history, unit_history = read_rows(floorplan_file), read_rows(unit_file)
+    daily_history = read_rows(daily_file) if daily_file else []
+    runs = read_rows(runs_file) if runs_file else []
+    if not daily_history:
+        daily_history = fallback_daily_rows(unit_history)
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    complete_times = successful_times(runs, [*floorplan_history, *unit_history])
+    current_times = {apartment: times[-1] for apartment, times in complete_times.items() if times}
+    current_daily = [row for row in daily_history if row["timestamp"] == current_times.get(row["apartment"])]
+    current_units = [row for row in unit_history if row["timestamp"] == current_times.get(row["apartment"])]
+    current_keys = {unit_identity(row) for row in current_units}
 
-    history_by_floorplan: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
-    for row in floorplan_history:
-        history_by_floorplan[(row["apartment"], row["floorplan"])].append(row)
-
-    floorplan_rows = []
-    current_floorplans = current_snapshot_rows(floorplan_history)
-    current_floorplan_keys = {(row["apartment"], row["floorplan"]) for row in current_floorplans}
-    for key in sorted(current_floorplan_keys):
-        rows = sorted(history_by_floorplan[key], key=lambda row: row["timestamp"])
-        prices = [price_to_cents(row["price"]) for row in rows]
-        latest = rows[-1]
-        change = prices[-1] - prices[0]
-        change_label = "No history yet" if len(prices) == 1 else f"{format_cents(change, include_sign=True)} since first snapshot"
-        floorplan_rows.append(
-            "<tr>"
-            f"<td><strong>{html.escape(latest['floorplan'])}</strong></td>"
-            f"<td>{html.escape(latest['sqft']) or '-'}</td>"
-            f"<td>{html.escape(latest['move_in'])}</td>"
-            f"<td><strong>{html.escape(latest['price'])}</strong><br><small>{change_label}</small></td>"
-            f"<td>{sparkline(prices)}</td>"
-            "</tr>"
-        )
-
-    grouped_units = group_unit_history(unit_history)
-    unit_histories = unit_history_data(
-        grouped_units, apartment_snapshot_times(floorplan_history, unit_history)
+    by_plan: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in daily_history:
+        by_plan[(row["apartment"], row["floorplan_id"])].append(row)
+    plan_data = []
+    table_rows = []
+    plan_keys = sorted(
+        {(row["apartment"], row["floorplan_id"]) for row in current_daily},
+        key=lambda key: (int_value(by_plan[key][-1]["sqft"]), key),
     )
-    summary_by_key = {history["key"]: history for history in unit_histories}
-    current_units = sorted(
-        current_snapshot_rows(unit_history),
-        key=lambda row: (row["apartment"], row["floorplan"], row["unit_id"]),
-    )
-    unit_rows = []
-    for row in current_units:
-        summary = summary_by_key["\u001f".join(unit_identity(row))]
-        change = summary["change_cents"]
-        change_label = "No history yet" if summary["snapshot_count"] == 1 else f"{format_cents(int(change), include_sign=True)}"
-        unit_rows.append(
-            "<tr>"
-            f"<td>{html.escape(row['floorplan'])}</td>"
-            f"<td><strong>{html.escape(row['unit_id'])}</strong></td>"
-            f"<td>{html.escape(row['move_in'])}</td>"
-            f"<td data-sort=\"{price_to_cents(row['price'])}\"><strong>{html.escape(row['price'])}</strong></td>"
-            f"<td data-sort=\"{int(change or 0)}\">{change_label}</td>"
-            "</tr>"
-        )
-    latest_timestamp = max((row["timestamp"] for row in floorplan_history), default="No snapshots yet")
-    history_json = json_for_script(unit_histories)
+    for index, key in enumerate(plan_keys, start=1):
+        history = sorted(by_plan[key], key=lambda row: row["timestamp"])
+        latest = history[-1]
+        points = [{"timestamp": row["timestamp"], "min": price_to_cents(row["min_rent"]),
+                   "median": price_to_cents(row["median_rent"]), "max": price_to_cents(row["max_rent"]),
+                   "units": int_value(row["visible_units"]), "psf": row["median_rent_per_sqft"],
+                   "new": int_value(row["newly_visible_units"]), "reductions": int_value(row["price_reductions"])} for row in history]
+        change7 = window_change(points, "median", 7)
+        change30 = window_change(points, "median", 30)
+        inventory7 = window_change(points, "units", 7)
+        inventory30 = window_change(points, "units", 30)
+        if change7 is None or inventory7 is None:
+            signal, signal_class = "Insufficient history", "neutral"
+        elif inventory7 > 0 and (change7 < 0 or price_to_cents(latest["min_rent"]) < points[-2]["min"]):
+            signal, signal_class = "Favorable / negotiate", "good"
+        elif inventory7 < 0 and change7 > 0:
+            signal, signal_class = "Act sooner", "bad"
+        else:
+            signal, signal_class = "Watch / wait", "neutral"
+        low_units = [row for row in current_units if (row["apartment"], row["floorplan_id"]) == key]
+        low = min(low_units, key=lambda row: price_to_cents(row["price"]), default=None)
+        available_now = sum(row["move_in"].casefold() in {"immediate", "now"} for row in low_units)
+        item = {"key": f"layout-{index}", "layout": f"Layout {index}", "sqft": latest["sqft"],
+                "points": points, "available_now": available_now, "low_rent": low["price"] if low else None,
+                "signal": signal, "history_count": len(points)}
+        plan_data.append(item)
+        changes = f"7d {format_cents(change7, True)} / 30d {format_cents(change30, True)}"
+        inventory = f"{latest['visible_units']} <small>7d {inventory7 if inventory7 is not None else '—'} / 30d {inventory30 if inventory30 is not None else '—'}</small>"
+        table_rows.append("<tr>" +
+            f"<td><button class=\"plan-link\" data-plan=\"{html.escape(item['key'], quote=True)}\">{item['layout']}</button><br><small>{html.escape(latest['sqft'])} sq ft</small></td>" +
+            f"<td>{inventory}</td><td><strong>{html.escape(latest['min_rent'])}</strong> / {html.escape(latest['median_rent'])} / {html.escape(latest['max_rent'])}</td>" +
+            f"<td>{html.escape(latest['median_rent_per_sqft']) or '—'}</td><td>{changes}</td>" +
+            f"<td>{html.escape(latest['earliest_move_in'])}</td><td><span class=\"signal {signal_class}\">{signal}</span></td></tr>")
 
-    document = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Building Price Tracker</title>
-<style>
-  :root {{ --ink:#282629; --muted:#706d6d; --paper:#faf8f5; --line:#ded8cf; --accent:#9a4e10; --good:#28724d; --bad:#a2382d; }}
-  * {{ box-sizing:border-box; }} body {{ margin:0; color:var(--ink); background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db); font-family:Georgia,serif; }}
-  main {{ max-width:1120px; margin:0 auto; padding:56px 24px 80px; }} h1 {{ margin:0; font-size:clamp(2.5rem,7vw,5rem); font-weight:400; letter-spacing:-.05em; }}
-  .eyebrow, small {{ color:var(--muted); font-family:ui-monospace,monospace; font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; }}
-  .summary {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:32px 0 48px; }} .metric {{ background:rgba(255,255,255,.67); border:1px solid var(--line); padding:18px; }}
-  .metric strong {{ display:block; margin-top:7px; font-size:1.65rem; font-weight:400; }} section {{ margin-top:42px; }} h2 {{ font-size:1.75rem; font-weight:400; margin:0 0 13px; }}
-  .panel {{ background:rgba(255,255,255,.78); border:1px solid var(--line); overflow:auto; }} table {{ width:100%; border-collapse:collapse; min-width:720px; font-family:ui-monospace,monospace; font-size:.84rem; }}
-  th,td {{ padding:15px 17px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }} th {{ color:var(--muted); font-size:.7rem; letter-spacing:.08em; text-transform:uppercase; }} th button {{ appearance:none; border:0; background:transparent; color:inherit; cursor:pointer; font:inherit; letter-spacing:inherit; padding:0; text-transform:inherit; }} tr:last-child td {{ border-bottom:0; }} svg {{ width:180px; height:48px; display:block; }}
-  .controls {{ display:flex; flex-wrap:wrap; gap:12px; margin:0 0 13px; }} label {{ display:grid; gap:5px; color:var(--muted); font-family:ui-monospace,monospace; font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; }} select {{ min-width:220px; border:1px solid var(--line); border-radius:0; background:#fff; color:var(--ink); font:inherit; padding:10px; }}
-  .unit-grid {{ display:grid; grid-template-columns:minmax(270px,.85fr) minmax(360px,1.4fr); gap:12px; }} .unit-summary {{ padding:20px; }} .unit-summary dl {{ display:grid; grid-template-columns:1fr auto; gap:11px 20px; margin:0; font-family:ui-monospace,monospace; font-size:.82rem; }} .unit-summary dt {{ color:var(--muted); }} .unit-summary dd {{ margin:0; text-align:right; }} .chart-wrap {{ min-height:250px; padding:20px; }} #unit-chart {{ width:100%; height:210px; }} .chart-label {{ fill:var(--muted); font:11px ui-monospace,monospace; }} .chart-line {{ fill:none; stroke:var(--accent); stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }} .chart-dot {{ fill:var(--accent); }} .empty {{ color:var(--muted); font-family:ui-monospace,monospace; font-size:.88rem; }}
-  @media (max-width:760px) {{ main {{ padding:36px 14px; }} .summary,.unit-grid {{ grid-template-columns:1fr; }} select {{ min-width:0; width:100%; }} }}
-</style></head><body><main>
-  <p class="eyebrow">Anonymous building / price history</p>
-  <h1>Apartment Tracker</h1>
-  <p>Last floor-plan snapshot: <strong>{html.escape(latest_timestamp)}</strong></p>
-  <div class="summary"><div class="metric"><span class="eyebrow">Floor plans</span><strong>{len(floorplan_rows)}</strong></div><div class="metric"><span class="eyebrow">Available units</span><strong>{len(unit_rows)}</strong></div><div class="metric"><span class="eyebrow">Floor-plan snapshots</span><strong>{len(floorplan_history)}</strong></div></div>
-  <section><h2>Floor Plan Trends</h2><div class="panel"><table><thead><tr><th>Floor plan</th><th>Sq. ft.</th><th>Available</th><th>Current rent</th><th>Trend</th></tr></thead><tbody>{''.join(floorplan_rows) or '<tr><td colspan="5">Run the tracker to create the first snapshot.</td></tr>'}</tbody></table></div></section>
-  <section><h2>Unit Price History</h2><p class="empty" id="unit-empty" hidden>No retained unit history is available yet.</p><div id="unit-explorer"><div class="controls"><label>Floor plan<select id="floorplan-filter"></select></label><label>Unit<select id="unit-selector"></select></label></div><div class="unit-grid"><div class="panel unit-summary" id="unit-summary"></div><div class="panel chart-wrap" id="unit-chart-wrap"><svg id="unit-chart" viewBox="0 0 620 210" role="img" aria-label="Selected unit price history"></svg><p class="empty" id="chart-empty" hidden>A single observation cannot show a price trend yet.</p></div></div></div></section>
-  <section><h2>Current Unit Availability</h2><div class="panel"><table id="current-units"><thead><tr><th><button data-column="0">Floor plan</button></th><th><button data-column="1">Unit</button></th><th><button data-column="2">Available</button></th><th><button data-column="3">Current rent</button></th><th><button data-column="4">Change since first</button></th></tr></thead><tbody>{''.join(unit_rows) or '<tr><td colspan="5">Unit details will appear after the next successful scrape.</td></tr>'}</tbody></table></div></section>
-</main><script id="unit-history-data" type="application/json">{history_json}</script>
-<script>
-(() => {{
-  const histories = JSON.parse(document.getElementById('unit-history-data').textContent);
-  const explorer = document.getElementById('unit-explorer');
-  const empty = document.getElementById('unit-empty');
-  const floorplan = document.getElementById('floorplan-filter');
-  const selector = document.getElementById('unit-selector');
-  const summary = document.getElementById('unit-summary');
-  const chart = document.getElementById('unit-chart');
-  const chartEmpty = document.getElementById('chart-empty');
-  const money = value => new Intl.NumberFormat('en-US', {{style:'currency', currency:'USD', maximumFractionDigits:0}}).format(value / 100);
-  const date = value => new Date(value).toLocaleDateString(undefined, {{year:'numeric', month:'short', day:'numeric'}});
-  const escaped = value => String(value).replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
-  function options() {{
-    const plans = [...new Set(histories.map(item => item.floorplan))].sort();
-    floorplan.innerHTML = '<option value="">All floor plans</option>' + plans.map(plan => `<option value="${{escaped(plan)}}">${{escaped(plan)}}</option>`).join('');
-    chooseUnits();
-  }}
-  function chooseUnits() {{
-    const selected = histories.filter(item => !floorplan.value || item.floorplan === floorplan.value);
-    selector.innerHTML = selected.map(item => `<option value="${{escaped(item.key)}}">${{escaped(item.floorplan)}} · ${{escaped(item.unit_id)}}</option>`).join('');
-    render();
-  }}
-  function render() {{
-    const item = histories.find(history => history.key === selector.value);
-    if (!item) return;
-    const change = item.change_cents;
-    const percent = item.change_percent === null ? '—' : `${{change > 0 ? '+' : ''}}${{item.change_percent.toFixed(1)}}%`;
-    summary.innerHTML = `<dl><dt>First observed</dt><dd>${{date(item.first_timestamp)}}</dd><dt>Latest observed</dt><dd>${{date(item.latest_timestamp)}}</dd><dt>First advertised rent</dt><dd>${{money(item.first_price)}}</dd><dt>Latest advertised rent</dt><dd>${{money(item.latest_price)}}</dd><dt>Change</dt><dd>${{change === 0 ? money(change) : (change > 0 ? '+' : '') + money(change)}} (${{percent}})</dd><dt>Visible snapshots</dt><dd>${{item.snapshot_count}}</dd></dl>`;
-    chart.replaceChildren();
-    chartEmpty.hidden = item.points.length > 1;
-    if (item.points.length < 2) return;
-    const width = 620, height = 210, left = 54, right = 18, top = 18, bottom = 36;
-    const prices = item.points.map(point => point.price), low = Math.min(...prices), high = Math.max(...prices), span = Math.max(high-low, 1);
-    const x = index => left + index * (width-left-right) / Math.max(item.points.length-1, 1);
-    const y = price => high === low ? (top + height-bottom) / 2 : height-bottom - (price-low) * (height-top-bottom) / span;
-    const ns = 'http://www.w3.org/2000/svg';
-    const make = (name, attrs) => {{ const node = document.createElementNS(ns, name); Object.entries(attrs).forEach(([key,value]) => node.setAttribute(key,value)); return node; }};
-    chart.append(make('line', {{x1:left,y1:height-bottom,x2:width-right,y2:height-bottom,stroke:'#ded8cf'}}));
-    chart.append(make('text', {{x:left,y:height-12,class:'chart-label'}})).textContent = date(item.points[0].timestamp);
-    chart.append(make('text', {{x:width-right,y:height-12,class:'chart-label','text-anchor':'end'}})).textContent = date(item.points.at(-1).timestamp);
-    chart.append(make('text', {{x:4,y:top+8,class:'chart-label'}})).textContent = money(high);
-    chart.append(make('text', {{x:4,y:height-bottom,class:'chart-label'}})).textContent = money(low);
-    let segment = [];
-    item.points.forEach((point, index) => {{
-      if (point.gap_before && segment.length) {{ chart.append(make('polyline', {{points:segment.join(' '),class:'chart-line'}})); segment = []; }}
-      segment.push(`${{x(index).toFixed(1)}},${{y(point.price).toFixed(1)}}`);
-      chart.append(make('circle', {{cx:x(index),cy:y(point.price),r:4,class:'chart-dot'}}));
-    }});
-    if (segment.length) chart.append(make('polyline', {{points:segment.join(' '),class:'chart-line'}}));
-  }}
-  floorplan.addEventListener('change', chooseUnits); selector.addEventListener('change', render);
-  if (!histories.length) {{ explorer.hidden = true; empty.hidden = false; }} else options();
-  const table = document.querySelector('#current-units tbody'); let ascending = true;
-  document.querySelectorAll('#current-units th button').forEach(button => button.addEventListener('click', () => {{
-    const column = Number(button.dataset.column); const rows = [...table.rows];
-    rows.sort((a,b) => {{ const av = a.cells[column].dataset.sort || a.cells[column].textContent.trim(); const bv = b.cells[column].dataset.sort || b.cells[column].textContent.trim(); return (Number(av) - Number(bv) || String(av).localeCompare(String(bv))) * (ascending ? 1 : -1); }});
-    rows.forEach(row => table.append(row)); ascending = !ascending;
-  }}));
-}})();
-</script></body></html>"""
+    market_points = []
+    for apartment, timestamps in complete_times.items():
+        for timestamp in timestamps:
+            rows = [row for row in unit_history if row["apartment"] == apartment and row["timestamp"] == timestamp]
+            if rows:
+                market_points.append({"timestamp": timestamp, "units": len(rows),
+                                      "median": int(median([price_to_cents(row["price"]) for row in rows])),
+                                      "reductions": sum(point["reductions"] for point in [p for plan in plan_data for p in plan["points"] if p["timestamp"] == timestamp])})
+    market_points.sort(key=lambda row: row["timestamp"])
+    latest_market = market_points[-1] if market_points else {"units": 0, "median": 0, "reductions": 0}
+    market_7_units, market_30_units = window_change(market_points, "units", 7), window_change(market_points, "units", 30)
+    market_7_rent, market_30_rent = window_change(market_points, "median", 7), window_change(market_points, "median", 30)
+
+    latest_timestamp = max((row["timestamp"] for row in current_daily), default="No complete snapshots yet")
+    document = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rental Market Tracker</title>
+<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1240px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font: .72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:auto}}table{{border-collapse:collapse;width:100%;min-width:1040px;font: .81rem ui-monospace,monospace}}th,td{{padding:13px 15px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}}th{{color:var(--muted);font-size:.68rem;text-transform:uppercase}}tr:last-child td{{border:0}}button{{font:inherit;color:inherit}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline}}.signal{{font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:9px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:1fr 280px;gap:10px;padding:16px}}svg{{display:block;width:100%;height:235px}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}dl{{display:grid;grid-template-columns:1fr auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right}}@media(max-width:760px){{main{{padding:32px 12px}}.summary,.detail-grid{{grid-template-columns:1fr}}select{{width:100%}}}}</style></head><body><main>
+<p class="eyebrow">Anonymous building / advertised inventory</p><h1>Rental Market</h1><p class="note">Latest complete snapshot: {html.escape(latest_timestamp)}. All prices are advertised rents, not executed lease prices.</p>
+<div class="summary"><div class="metric"><span class="eyebrow">Advertised units</span><strong>{latest_market['units']}</strong><small>7d {market_7_units if market_7_units is not None else '—'} / 30d {market_30_units if market_30_units is not None else '—'}</small></div><div class="metric"><span class="eyebrow">Available floor plans</span><strong>{len(plan_data)}</strong><small>current complete run</small></div><div class="metric"><span class="eyebrow">Median advertised rent</span><strong>{format_cents(latest_market['median']) if market_points else '—'}</strong><small>7d {format_cents(market_7_rent, True)} / 30d {format_cents(market_30_rent, True)}</small></div><div class="metric"><span class="eyebrow">Visible price reductions</span><strong>{latest_market['reductions']}</strong><small>vs. prior observed price</small></div></div>
+<section><h2>Floor-plan value comparison</h2><p class="note">Signals are descriptive, not predictions. Window changes require enough complete daily observations.</p><div class="panel"><table><thead><tr><th>Floor plan</th><th>Inventory</th><th>Current min / median / max</th><th>Median $/sq ft</th><th>Median-rent change</th><th>Earliest move-in</th><th>Renter signal</th></tr></thead><tbody>{''.join(table_rows) or '<tr><td colspan="7">Run the collector to create a complete inventory snapshot.</td></tr>'}</tbody></table></div></section>
+<section><h2>Layout detail</h2><div class="controls"><label>Layout<select id="plan-selector"></select></label></div><div class="panel"><div class="detail-grid"><div><svg id="plan-chart" viewBox="0 0 700 235" role="img" aria-label="Minimum median and maximum advertised rent"></svg><p class="note">Minimum · median · maximum advertised rent; flat trends still draw lines and markers.</p><svg id="inventory-chart" viewBox="0 0 700 120" role="img" aria-label="Advertised listing count"></svg></div><div id="plan-summary"></div></div></div></section>
+<section><h2>How to use this</h2><p class="note">Choose a layout using price per square foot, its median-rent and inventory direction, and your move-in deadline. Individual listings are intentionally not published: disappearance only means no longer advertised, not leased. Floor-level comparisons are withheld until the inventory source provides a reliable floor field.</p></section>
+</main><script id="plan-data" type="application/json">{json_for_script(plan_data)}</script><script>
+(()=>{{const plans=JSON.parse(document.querySelector('#plan-data').textContent),money=v=>new Intl.NumberFormat('en-US',{{style:'currency',currency:'USD',maximumFractionDigits:0}}).format(v/100),date=v=>new Date(v).toLocaleDateString(undefined,{{month:'short',day:'numeric'}}),make=(n,a)=>{{const e=document.createElementNS('http://www.w3.org/2000/svg',n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));return e}},path=(svg,points,field,klass,h=235)=>{{if(!points.length)return;const w=700,l=52,r=12,t=12,b=30,vs=points.map(p=>p[field]),lo=Math.min(...vs),hi=Math.max(...vs),x=i=>l+i*(w-l-r)/Math.max(points.length-1,1),y=v=>hi===lo?(t+h-b)/2:h-b-(v-lo)*(h-t-b)/(hi-lo);svg.append(make('polyline',{{points:points.map((p,i)=>`${{x(i).toFixed(1)}},${{y(p[field]).toFixed(1)}}`).join(' '),'class':klass}}));points.forEach((p,i)=>svg.append(make('circle',{{cx:x(i),cy:y(p[field]),r:3,'class':'dot'}})));return {{lo,hi}}}};
+const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),ic=document.querySelector('#inventory-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();ic.replaceChildren();let scale=path(pc,p.points,'min','line-min');path(pc,p.points,'median','line-med');path(pc,p.points,'max','line-max');if(scale){{pc.append(make('text',{{x:2,y:18,'class':'chart-label'}})).textContent=money(scale.hi);pc.append(make('text',{{x:2,y:205,'class':'chart-label'}})).textContent=money(scale.lo);pc.append(make('text',{{x:52,y:228,'class':'chart-label'}})).textContent=date(p.points[0].timestamp);pc.append(make('text',{{x:688,y:228,'class':'chart-label','text-anchor':'end'}})).textContent=date(p.points.at(-1).timestamp)}}path(ic,p.points,'units','line-med',120);pSum.innerHTML=`<dl><dt>Signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Daily observations</dt><dd>${{p.history_count}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
     output_file.write_text(document, encoding="utf-8")

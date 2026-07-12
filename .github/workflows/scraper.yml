@@ -34,6 +34,8 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Run scraper
+        env:
+          RENTAL_BUILDING_PAGE_ID: ${{ secrets.RENTAL_BUILDING_PAGE_ID }}
         run: |
           python scraper.py --no-sheets
 
@@ -41,7 +43,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/unit_prices.csv data/unit_snapshots.csv data/report.html
+          git add data/unit_prices.csv data/unit_snapshots.csv data/floorplan_daily.csv data/scrape_runs.csv data/report.html
           if git diff --cached --quiet; then
             echo "No price-history changes to commit."
             exit 0
