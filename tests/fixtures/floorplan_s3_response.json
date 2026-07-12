@@ -1,0 +1,19 @@
+{
+  "floorplan_name": "S3",
+  "query_response": [
+    {
+      "ra_date_available": "10/17/2025",
+      "ra_rent": "3757.00",
+      "omg_feeds_apartment_squarefootage": "618",
+      "omg_feeds_floorplan_id": "3553544",
+      "the_title": "UNIT-0704"
+    },
+    {
+      "ra_date_available": "07/20/2026",
+      "ra_rent": "3925.00",
+      "omg_feeds_apartment_squarefootage": "618",
+      "omg_feeds_floorplan_id": "3553544",
+      "the_title": "UNIT-0804"
+    }
+  ]
+}

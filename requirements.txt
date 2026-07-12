@@ -1,2 +1,2 @@
-playwright==1.51.0
-gspread==6.2.1
+# The scheduled collector uses only the Python standard library.
+# Google Sheets export is optional: pip install gspread

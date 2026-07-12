@@ -1,0 +1,17 @@
+{
+  "apts_result": [
+    {
+      "apt_id": "194379",
+      "omg_feeds_floorplan_id": "3553544",
+      "rent_formatted": "3757",
+      "move_in_date": "1970-01-01",
+      "floorplan_name": "S3",
+      "rent_from_price": "$3,757",
+      "date_formatted": "Now",
+      "sqft_commas": "618"
+    }
+  ],
+  "group_count": 1,
+  "apt_count": "2",
+  "result_hash": "sanitized-fixture"
+}
