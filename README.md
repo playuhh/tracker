@@ -11,6 +11,10 @@ The tracker records:
 - anonymized listing key, rent, availability date, and anonymized layout ID
 - UTC snapshot timestamp
 
+For the durable product context—privacy boundaries, data definitions, decision
+interpretation, and the deployment runbook—see
+[PROJECT_CONTEXT.md](PROJECT_CONTEXT.md).
+
 ## Setup
 
 The core tracker has no third-party Python dependencies.
