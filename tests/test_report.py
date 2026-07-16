@@ -100,6 +100,7 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertIn("Collecting history (3/7 days)", report)
         self.assertIn("How to use this", report)
         self.assertIn("rentValues=p.points.flatMap", report)
+        self.assertIn("tooltip=make('title'", report)
         self.assertNotIn("UNIT-0704", report)
 
     @staticmethod
