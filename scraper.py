@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from catalog import secure_unit_id
 from g import update_google_sheet
 from report import generate_report
 
@@ -62,6 +63,7 @@ SCRAPE_RUNS_FILE = Path("data/scrape_runs.csv")
 SCRAPE_RUNS_FIELDS = ["timestamp", "apartment", "status", "floorplan_count", "unit_count"]
 UNIT_TRAITS_FILE = Path("data/unit_traits.csv")
 REPORT_FILE = Path("data/report.html")
+UNIT_ID_HASH_KEY = os.environ.get("UNIT_ID_HASH_KEY", "")
 PRICE_PATTERN = re.compile(r"^\$?[\d,]+(?:\.\d{1,2})?$")
 
 
@@ -82,7 +84,8 @@ def opaque_label(kind: str, source_value: str) -> str:
 
 
 def anonymize_snapshot_rows(
-    floorplans: Iterable[dict[str, str]], unit_details: Iterable[dict[str, str]]
+    floorplans: Iterable[dict[str, str]], unit_details: Iterable[dict[str, str]],
+    unit_hash_key: str,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Remove property, layout, and listing labels before persistence or publication."""
     floorplans = [dict(row) for row in floorplans]
@@ -100,8 +103,33 @@ def anonymize_snapshot_rows(
         )
         row["apartment"] = "Building A"
         row["floorplan"], row["floorplan_id"] = layout
-        row["unit_id"] = opaque_label("listing", row["unit_id"])
+        row["unit_id"] = secure_unit_id(row["unit_id"], unit_hash_key)
     return floorplans, unit_details
+
+
+def validate_unit_catalog_coverage(
+    unit_details: Iterable[dict[str, str]], catalog_rows: Iterable[dict[str, str]],
+    unit_hash_key: str, expected_catalog_size: int = 360,
+) -> None:
+    """Require each advertised residence to match its verified PDF catalog row."""
+    catalog = {row["unit_id"]: row for row in catalog_rows}
+    if len(catalog) != expected_catalog_size:
+        raise RuntimeError(
+            f"Verified anonymous residence catalog must contain {expected_catalog_size} unique homes"
+        )
+    missing = 0
+    mismatched = 0
+    for unit in unit_details:
+        trait = catalog.get(secure_unit_id(unit["unit_id"], unit_hash_key))
+        if trait is None:
+            missing += 1
+        elif trait.get("floorplan") != unit["floorplan"]:
+            mismatched += 1
+    if missing or mismatched:
+        raise RuntimeError(
+            "Advertised inventory did not match the verified residence catalog "
+            f"({missing} missing, {mismatched} floor-plan mismatches)"
+        )
 
 
 def format_price(value: Any) -> str:
@@ -288,7 +316,9 @@ PostJSON = Callable[[Mapping[str, str]], dict[str, Any]]
 
 
 def scrape_apartment(
-    apartment: str, page_id: str, post: PostJSON = post_json
+    apartment: str, page_id: str, post: PostJSON = post_json,
+    unit_hash_key: str | None = None,
+    catalog_rows: Iterable[dict[str, str]] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Collect one overview plus one public detail request per floor plan."""
     print(f"[INFO] Loading {apartment}...")
@@ -308,7 +338,12 @@ def scrape_apartment(
         f"[INFO] Found {len(floorplans)} floor plans and {len(unit_details)} individual units "
         f"for {apartment}."
     )
-    floorplans, unit_details = anonymize_snapshot_rows(floorplans, unit_details)
+    resolved_hash_key = unit_hash_key if unit_hash_key is not None else UNIT_ID_HASH_KEY
+    if catalog_rows is not None:
+        validate_unit_catalog_coverage(unit_details, catalog_rows, resolved_hash_key)
+    floorplans, unit_details = anonymize_snapshot_rows(
+        floorplans, unit_details, resolved_hash_key
+    )
     return (
         [{field: floorplan[field] for field in CSV_FIELDS} for floorplan in floorplans],
         unit_details,
@@ -320,8 +355,11 @@ def scrape_all() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         raise RuntimeError("Set RENTAL_BUILDING_PAGE_ID before collecting inventory")
     units: list[dict[str, str]] = []
     unit_details: list[dict[str, str]] = []
+    catalog_rows = read_rows_csv(UNIT_TRAITS_FILE)
     for apartment, page_id in APARTMENTS.items():
-        apartment_units, apartment_unit_details = scrape_apartment(apartment, page_id)
+        apartment_units, apartment_unit_details = scrape_apartment(
+            apartment, page_id, catalog_rows=catalog_rows
+        )
         units.extend(apartment_units)
         unit_details.extend(apartment_unit_details)
     return units, unit_details

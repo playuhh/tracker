@@ -11,7 +11,8 @@ The tracker records:
 - anonymized listing key, rent, availability date, and anonymized layout ID
 - UTC snapshot timestamp
 - personalized, layout-level recommendation inputs from an anonymous verified
-  unit-traits table (exposure, sunlight, view, floor band, and disturbance risk)
+  residence catalog (exposure, pool-facing/exterior facade, sunlight, view,
+  floor band, and disturbance risk)
 
 For the durable product context—privacy boundaries, data definitions, decision
 interpretation, and the deployment runbook—see
@@ -25,6 +26,7 @@ Set the target building's page ID locally; do not commit it:
 
 ```bash
 export RENTAL_BUILDING_PAGE_ID="private-page-id"
+export UNIT_ID_HASH_KEY="a-private-random-string-with-at-least-32-characters"
 python3 -m venv .venv
 .venv/bin/python scraper.py --no-sheets
 ```
@@ -89,16 +91,21 @@ the report to GitHub Pages.
 
 The recommendation score is regenerated automatically on every run. It assigns
 35 points to a currently advertised home's rent relative to its layout peers
-and 65 points to verified exposure, direct sunlight, view, floor band, and
-disturbance/privacy. The public layout score is the best verified current option
-for that layout; coverage is shown so an unrated new listing is never silently
-treated as average.
+and 65 points to verified exposure, direct sunlight, pool-facing preference,
+view, floor band, and disturbance/privacy. The weights and point values are
+published at the bottom of the dashboard. The public layout score is the best
+verified current option for that layout; coverage is shown so an unrated new
+listing is never silently treated as average.
 
 Before the first remote run, push the repository changes to GitHub and enable
 **Settings -> Pages -> Source: GitHub Actions** in the GitHub repository. Also
 add the page ID as the repository
 secret `RENTAL_BUILDING_PAGE_ID`; without it, the collector intentionally stops
 instead of exposing or guessing a building target.
+Add `UNIT_ID_HASH_KEY` as a second repository secret. It must be the same
+32-plus-character random key used to compile `data/unit_traits.csv`; the keyed
+identifier lets the collector join each advertised residence to its verified
+traits without publishing an enumerable room-number mapping.
 
 ```text
 https://<account>.github.io/<repository>/

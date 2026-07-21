@@ -13,11 +13,14 @@ from scraper import (
     price_to_cents,
     scrape_run_rows,
     scrape_apartment,
+    validate_unit_catalog_coverage,
 )
+from catalog import secure_unit_id
 from report import sparkline
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TIMESTAMP = "2026-07-10T00:00:00+00:00"
+TEST_KEY = "test-key-with-at-least-thirty-two-characters"
 
 
 def load_fixture(name: str) -> dict:
@@ -91,10 +94,10 @@ class ScraperHelpersTest(unittest.TestCase):
             TIMESTAMP,
             today=date(2026, 7, 12),
         )
-        self.assertEqual(units[0]["unit_id"], "UNIT-0704")
+        self.assertEqual(units[0]["unit_id"], "CAP-9001")
         self.assertEqual(units[0]["price"], "$3,757")
         self.assertEqual(units[0]["move_in"], "Immediate")
-        self.assertEqual(units[1]["unit_id"], "UNIT-0804")
+        self.assertEqual(units[1]["unit_id"], "CAP-9002")
         self.assertEqual(units[1]["price"], "$3,925")
         self.assertEqual(units[1]["move_in"], "Jul 20")
 
@@ -135,11 +138,27 @@ class ScraperHelpersTest(unittest.TestCase):
         def post(request: dict[str, str]) -> dict:
             return overview if request["action"] == "omg_apt_search_main_query" else detail
 
-        floorplans, units = scrape_apartment("Building A", "private-page-id", post)
+        floorplans, units = scrape_apartment(
+            "Building A", "private-page-id", post, unit_hash_key=TEST_KEY
+        )
         self.assertTrue(floorplans[0]["floorplan"].startswith("layout-"))
         self.assertTrue(units[0]["floorplan_id"].startswith("layout-id-"))
         self.assertTrue(units[0]["unit_id"].startswith("listing-"))
-        self.assertNotIn("UNIT-0704", units[0].values())
+        self.assertNotIn("CAP-9001", units[0].values())
+
+    def test_live_inventory_must_match_verified_catalog(self):
+        live = [
+            {"unit_id": "CAP-9001", "floorplan": "S3"},
+            {"unit_id": "CAP-9002", "floorplan": "S3"},
+        ]
+        catalog = [
+            {"unit_id": secure_unit_id(row["unit_id"], TEST_KEY), "floorplan": "S3"}
+            for row in live
+        ]
+        validate_unit_catalog_coverage(live, catalog, TEST_KEY, expected_catalog_size=2)
+        catalog[1]["floorplan"] = "A1"
+        with self.assertRaisesRegex(RuntimeError, "1 floor-plan mismatches"):
+            validate_unit_catalog_coverage(live, catalog, TEST_KEY, expected_catalog_size=2)
 
     def test_describe_price_changes(self):
         previous = {

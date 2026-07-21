@@ -13,9 +13,9 @@ identify a particular building or unit.
   variable or GitHub repository secret). Never commit its value.
 - Treat an advertisement disappearing as **no longer advertised**, not proof
   that it was rented. Listings may be withdrawn, edited, or temporarily hidden.
-- Do not infer a floor from an apartment/listing label alone. Verified building
-  layout metadata may supply an anonymous floor band, but exact floors and the
-  source mapping must never be persisted or published.
+- The private canonical catalog may map room number to exact floor and traits,
+  but it must stay under ignored `private/`. Tracked files may contain only a
+  keyed unit identifier and anonymous floor band; never publish the source map.
 - Individual listing snapshots exist solely to derive aggregates. The public
   report must remain layout-first and must not expose a browsable unit list.
 
@@ -32,7 +32,7 @@ look like inventory disappearing.
 | `data/unit_snapshots.csv` | Pseudonymized listing observations used for calculations |
 | `data/floorplan_daily.csv` | Daily layout aggregates: inventory, min/median/max rent, $/sq ft, new visibility, and reductions |
 | `data/scrape_runs.csv` | Successful-run coverage used to separate missing data from absent listings |
-| `data/unit_traits.csv` | Anonymous verified exposure, sunlight, view, floor-band, and disturbance inputs |
+| `data/unit_traits.csv` | Anonymous per-residence exposure, facade, pool-facing, sunlight, view, floor-band, and disturbance inputs |
 | `data/report.html` | Public anonymous renter dashboard |
 
 The current min / median / max values describe **all listings visible in the
@@ -50,9 +50,10 @@ that layout's recorded square footage.
 - Inventory rising, new listings appearing, or observed price reductions can
   strengthen a renter's position; low inventory or earlier move-in dates can
   imply urgency. These are decision aids, not predictions of final lease price.
-- Personalized fit uses a renter-specific preference for southeast exposure and
-  observed sunlight. Northwest exposure with mountain shade is penalized. It is
-  separate from the market timing signal and is not a universal valuation model.
+- Personalized fit uses a renter-specific preference for southeast exposure,
+  pool-facing interior facade, and observed sunlight. Northwest exposure with
+  mountain shade is penalized. Pool activity/noise remains a separate risk.
+  These are personal-fit weights, not a universal market valuation model.
 - A flat chart is valid: the same advertised prices can persist across several
   snapshots.
 
@@ -75,6 +76,7 @@ that layout's recorded square footage.
 
 ```bash
 export RENTAL_BUILDING_PAGE_ID="private-page-id"
+export UNIT_ID_HASH_KEY="private-random-key"
 python3 -m unittest discover -q
 python3 scraper.py --report-only
 python3 scraper.py --dry-run --no-sheets
@@ -101,9 +103,11 @@ writing observations.
 ## Change checklist
 
 1. Keep source identifiers and personal information out of tracked output.
-2. Run the test suite for code changes and regenerate `data/report.html` when
+2. Validate the 360-row private catalog and compile its keyed anonymous public
+   counterpart before collecting inventory.
+3. Run the test suite for code changes and regenerate `data/report.html` when
    report logic changes.
-3. Review `git status`; do not accidentally add local files such as `.DS_Store`
+4. Review `git status`; do not accidentally add local files such as `.DS_Store`
    or private planning notes.
-4. For public-facing changes, trigger the workflow and verify its GitHub Pages
+5. For public-facing changes, trigger the workflow and verify its GitHub Pages
    result.

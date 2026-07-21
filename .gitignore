@@ -4,3 +4,5 @@ __pycache__/
 
 # Keep price history in Git so the scheduled cloud job has persistent state.
 g.json
+private/
+tmp/

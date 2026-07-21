@@ -36,6 +36,7 @@ jobs:
       - name: Run scraper
         env:
           RENTAL_BUILDING_PAGE_ID: ${{ secrets.RENTAL_BUILDING_PAGE_ID }}
+          UNIT_ID_HASH_KEY: ${{ secrets.UNIT_ID_HASH_KEY }}
         run: |
           python scraper.py --no-sheets
 

@@ -94,10 +94,10 @@ class UnitHistoryTest(unittest.TestCase):
             self.write_csv(floorplan_file, [floorplan(timestamp) for timestamp in self.timestamps])
             self.write_csv(traits_file, [
                 {"unit_id": "UNIT-0704", "exposure": "SE", "sunlight": "good",
-                 "view": "skyline_partial", "floor_band": "mid_high",
+                 "facade": "internal", "view": "pool_skyline_partial", "floor_band": "mid_high",
                  "disturbance": "medium", "confidence": "layout_plus_resident"},
                 {"unit_id": "UNIT-0804", "exposure": "NW", "sunlight": "low",
-                 "view": "none", "floor_band": "mid_high",
+                 "facade": "external", "view": "none", "floor_band": "mid_high",
                  "disturbance": "low", "confidence": "layout_plus_resident"},
             ])
 
@@ -118,6 +118,8 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertIn("35 points", report)
         self.assertIn("Exposure / direction", report)
         self.assertIn("17 points", report)
+        self.assertIn("Pool-facing preference", report)
+        self.assertIn("12 points", report)
         self.assertIn("Floor-plan size", report)
         self.assertIn("0 direct points", report)
         self.assertIn("Best match 82–100", report)
@@ -132,9 +134,10 @@ class UnitHistoryTest(unittest.TestCase):
             unit(self.timestamps[3], "shaded", "$3,600"),
         ]
         traits = {
-            "sunny": {"exposure": "SE", "sunlight": "good", "view": "skyline_partial",
+            "sunny": {"exposure": "SE", "sunlight": "good", "facade": "internal",
+                      "view": "pool_skyline_partial",
                       "floor_band": "mid_high", "disturbance": "medium"},
-            "shaded": {"exposure": "NW", "sunlight": "low", "view": "none",
+            "shaded": {"exposure": "NW", "sunlight": "low", "facade": "external", "view": "none",
                        "floor_band": "mid_high", "disturbance": "low"},
         }
         result = plan_recommendation(peers, traits)

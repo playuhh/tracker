@@ -15,17 +15,20 @@ from typing import Iterable
 UnitKey = tuple[str, str, str]
 
 EXPOSURE_POINTS = {"SE": 17, "SW": 11, "NE": 8, "NW": 1, "unknown": 7}
-SUNLIGHT_POINTS = {"good": 13, "mixed": 7, "low": 0, "unknown": 5}
+SUNLIGHT_POINTS = {"good": 10, "mixed": 6, "low": 0, "unknown": 4}
+FACADE_POINTS = {"internal": 12, "external": 0, "unknown": 5}
 VIEW_POINTS = {
-    "skyline_open": 15,
-    "skyline_partial": 10,
-    "open": 7,
-    "courtyard": 2,
+    "skyline_open": 9,
+    "pool_skyline_partial": 9,
+    "skyline_partial": 7,
+    "pool_courtyard": 7,
+    "courtyard": 5,
+    "open": 4,
     "none": 1,
-    "unknown": 4,
+    "unknown": 3,
 }
-FLOOR_BAND_POINTS = {"low": 3, "mid": 5, "mid_high": 8, "upper": 10, "unknown": 5}
-DISTURBANCE_POINTS = {"low": 10, "medium": 6, "high": 2, "unknown": 5}
+FLOOR_BAND_POINTS = {"low": 3, "mid": 5, "mid_high": 7, "upper": 9, "unknown": 5}
+DISTURBANCE_POINTS = {"low": 8, "medium": 6, "high": 2, "unknown": 5}
 
 
 def read_rows(filename: Path) -> list[dict[str, str]]:
@@ -72,8 +75,8 @@ def unit_recommendation(
 ) -> dict[str, object] | None:
     """Score one current listing without exposing it in the public report.
 
-    Price contributes 35 points. Orientation, observed solar access, view,
-    verified floor band, and disturbance/privacy contribute 65 points.
+    Price contributes 35 points. Orientation, observed solar access, facade
+    context, view, verified floor band, and disturbance/privacy contribute 65 points.
     """
     trait = traits.get(unit["unit_id"])
     if not trait:
@@ -85,12 +88,14 @@ def unit_recommendation(
     price_points = round(clamp(28 - percent_above * 1.4, 14, 35))
     exposure = trait.get("exposure", "unknown")
     sunlight = trait.get("sunlight", "unknown")
+    facade = trait.get("facade", "unknown")
     view = trait.get("view", "unknown")
     floor_band = trait.get("floor_band", "unknown")
     disturbance = trait.get("disturbance", "unknown")
     fit_points = (
         EXPOSURE_POINTS.get(exposure, EXPOSURE_POINTS["unknown"])
         + SUNLIGHT_POINTS.get(sunlight, SUNLIGHT_POINTS["unknown"])
+        + FACADE_POINTS.get(facade, FACADE_POINTS["unknown"])
         + VIEW_POINTS.get(view, VIEW_POINTS["unknown"])
         + FLOOR_BAND_POINTS.get(floor_band, FLOOR_BAND_POINTS["unknown"])
         + DISTURBANCE_POINTS.get(disturbance, DISTURBANCE_POINTS["unknown"])
@@ -106,12 +111,14 @@ def unit_recommendation(
         reasons.append("good direct-light potential")
     elif sunlight == "low":
         reasons.append("mountain shade / little direct sun")
+    if facade == "internal":
+        reasons.append("preferred pool-facing interior")
     if view == "skyline_open":
         reasons.append("open skyline view")
-    elif view == "skyline_partial":
+    elif view in {"skyline_partial", "pool_skyline_partial"}:
         reasons.append("partial skyline view")
-    elif view == "courtyard":
-        reasons.append("courtyard-facing")
+    elif view in {"courtyard", "pool_courtyard"}:
+        reasons.append("pool/courtyard view")
     if floor_band in {"mid_high", "upper"}:
         reasons.append("better vertical clearance")
     if disturbance == "high":
@@ -125,6 +132,7 @@ def unit_recommendation(
         "price_points": price_points,
         "fit_points": fit_points,
         "exposure": exposure,
+        "facade": facade,
         "sunlight": sunlight,
         "reasons": reasons,
     }
@@ -138,7 +146,8 @@ def plan_recommendation(
     if not scored:
         return {"score": None, "median_score": None, "label": "Not rated", "class": "neutral",
                 "rated_count": 0, "unit_count": len(units), "preferred_count": 0,
-                "low_sun_count": 0, "reasons": ["no verified orientation data yet"]}
+                "pool_facing_count": 0, "low_sun_count": 0,
+                "reasons": ["no verified orientation data yet"]}
     best = max(scored, key=lambda result: int(result["score"]))
     scores = [int(result["score"]) for result in scored]
     return {
@@ -147,6 +156,7 @@ def plan_recommendation(
         "rated_count": len(scored),
         "unit_count": len(units),
         "preferred_count": sum(result["exposure"] == "SE" for result in scored),
+        "pool_facing_count": sum(result["facade"] == "internal" for result in scored),
         "low_sun_count": sum(result["sunlight"] == "low" for result in scored),
     }
 
@@ -326,7 +336,7 @@ def generate_report(
     for row in daily_history:
         by_plan[(row["apartment"], row["floorplan_id"])].append(row)
     plan_data = []
-    table_rows = []
+    recommendation_cards = []
     plan_keys = sorted(
         {(row["apartment"], row["floorplan_id"]) for row in current_daily},
         key=lambda key: (int_value(by_plan[key][-1]["sqft"]), key),
@@ -368,12 +378,20 @@ def generate_report(
         fit = (f'<div class="fit-stack"><strong class="score">{score_display}</strong>'
                f'<span class="signal {recommendation["class"]}">{recommendation["label"]}</span>'
                f'<small>{recommendation["rated_count"]}/{recommendation["unit_count"]} current homes rated</small></div>')
-        table_rows.append("<tr>" +
-            f"<td><button class=\"plan-link\" data-plan=\"{html.escape(item['key'], quote=True)}\">{item['layout']}</button><br><small>{html.escape(latest['sqft'])} sq ft</small></td>" +
-            f"<td>{fit}</td><td>{html.escape(reasons)}</td>" +
-            f"<td>{inventory}</td><td><strong>{html.escape(latest['min_rent'])}</strong> / {html.escape(latest['median_rent'])} / {html.escape(latest['max_rent'])}</td>" +
-            f"<td>{html.escape(latest['median_rent_per_sqft']) or '—'}</td><td>{changes}</td>" +
-            f"<td>{html.escape(latest['earliest_move_in'])}</td><td><span class=\"signal market-signal {signal_class}\">{signal}</span></td></tr>")
+        recommendation_cards.append(
+            f'<article class="plan-card"><header><div><button class="plan-link" '
+            f'data-plan="{html.escape(item["key"], quote=True)}">{item["layout"]}</button>'
+            f'<small>{html.escape(latest["sqft"])} sq ft</small></div>{fit}</header>'
+            f'<p class="why">{html.escape(reasons)}</p><dl class="card-stats">'
+            f'<dt>Inventory</dt><dd>{inventory}</dd>'
+            f'<dt>Min / median / max</dt><dd><strong>{html.escape(latest["min_rent"])}</strong> / '
+            f'{html.escape(latest["median_rent"])} / {html.escape(latest["max_rent"])}</dd>'
+            f'<dt>Median $/sq ft</dt><dd>{html.escape(latest["median_rent_per_sqft"]) or "—"}</dd>'
+            f'<dt>Median-rent change</dt><dd>{changes}</dd>'
+            f'<dt>Earliest move-in</dt><dd>{html.escape(latest["earliest_move_in"])}</dd>'
+            f'<dt>Market signal</dt><dd><span class="signal market-signal {signal_class}">{signal}</span></dd>'
+            '</dl></article>'
+        )
 
     market_points = []
     for apartment, timestamps in complete_times.items():
@@ -394,22 +412,23 @@ def generate_report(
     best_fit = (f'{best_plan["layout"]} · {best_plan["recommendation"]["score"]}/100'
                 if best_plan else "Collecting traits")
     document = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rental Market Tracker</title>
-<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1380px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}h3{{margin:0;font-size:1rem;font-weight:400}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font: .72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel,.method-card{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:auto}}table{{border-collapse:collapse;width:100%;min-width:1220px;font: .81rem ui-monospace,monospace}}th,td{{padding:13px 15px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}}th{{color:var(--muted);font-size:.68rem;text-transform:uppercase}}tr:last-child td{{border:0}}button{{font:inherit;color:inherit}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline}}.fit-stack{{display:grid;justify-items:start;gap:7px;min-width:140px}}.score{{display:block;font-size:1.2rem}}.fit-stack small{{line-height:1.35}}.signal{{display:inline-block;font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.market-signal{{max-width:190px;white-space:normal;line-height:1.25}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:9px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:1fr 320px;gap:10px;padding:16px}}svg{{display:block;width:100%;height:235px}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}dl{{display:grid;grid-template-columns:1fr auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right;max-width:180px}}.method-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}}.method-card{{padding:16px}}.method-card .weight{{display:block;margin:8px 0;font:1.35rem ui-monospace,monospace}}.method-card p{{margin:0;color:var(--muted);font:.78rem/1.5 ui-monospace,monospace}}.method-wide{{grid-column:span 2}}.method-foot{{margin-top:12px;padding:16px;border-left:3px solid var(--accent);background:#ffffff8f}}@media(max-width:900px){{main{{padding:32px 12px}}.summary,.detail-grid,.method-grid{{grid-template-columns:1fr}}.method-wide{{grid-column:auto}}select{{width:100%}}}}</style></head><body><main>
+<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1380px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}h3{{margin:0;font-size:1rem;font-weight:400}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font: .72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel,.method-card,.plan-card{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:hidden}}button{{font:inherit;color:inherit}}.plan-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}}.plan-card{{padding:18px;min-width:0}}.plan-card header{{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}}.plan-card header>div:first-child{{display:grid;gap:8px}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline;font-size:1rem;text-align:left}}.fit-stack{{display:grid;justify-items:end;gap:6px;min-width:132px}}.score{{display:block;font-size:1.2rem}}.fit-stack small{{line-height:1.35;text-align:right}}.why{{min-height:2.6em;margin:16px 0;color:var(--ink);font:.82rem/1.45 ui-monospace,monospace}}.card-stats{{border-top:1px solid var(--line);padding-top:13px}}.signal{{display:inline-block;font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.market-signal{{max-width:190px;white-space:normal;line-height:1.25}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:9px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:1fr 320px;gap:10px;padding:16px}}svg{{display:block;width:100%;height:235px}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}dl{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right;max-width:230px;overflow-wrap:anywhere}}.method-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}}.method-card{{padding:16px}}.method-card .weight{{display:block;margin:8px 0;font:1.35rem ui-monospace,monospace}}.method-card p{{margin:0;color:var(--muted);font:.78rem/1.5 ui-monospace,monospace}}.method-wide{{grid-column:span 2}}.method-foot{{margin-top:12px;padding:16px;border-left:3px solid var(--accent);background:#ffffff8f}}@media(max-width:900px){{main{{padding:32px 12px}}.summary,.detail-grid,.method-grid,.plan-grid{{grid-template-columns:1fr}}.method-wide{{grid-column:auto}}select{{width:100%}}}}@media(max-width:520px){{.plan-card header{{display:grid}}.fit-stack{{justify-items:start;min-width:0}}.fit-stack small{{text-align:left}}dl{{grid-template-columns:1fr}}dd{{text-align:left;max-width:none;margin-bottom:6px}}}}</style></head><body><main>
 <p class="eyebrow">Anonymous building / advertised inventory</p><h1>Rental Market</h1><p class="note">Latest complete snapshot: {html.escape(latest_timestamp)}. All prices are advertised rents, not executed lease prices.</p>
 <div class="summary"><div class="metric"><span class="eyebrow">Advertised units</span><strong>{latest_market['units']}</strong><small>7d {market_7_units if market_7_units is not None else '—'} / 30d {market_30_units if market_30_units is not None else '—'}</small></div><div class="metric"><span class="eyebrow">Available floor plans</span><strong>{len(plan_data)}</strong><small>current complete run</small></div><div class="metric"><span class="eyebrow">Best current fit</span><strong>{best_fit}</strong><small>best rated home, layout-level display</small></div><div class="metric"><span class="eyebrow">Median advertised rent</span><strong>{format_cents(latest_market['median']) if market_points else '—'}</strong><small>7d {format_cents(market_7_rent, True)} / 30d {format_cents(market_30_rent, True)}</small></div><div class="metric"><span class="eyebrow">Visible price reductions</span><strong>{latest_market['reductions']}</strong><small>vs. prior observed price</small></div></div>
-<section><h2>Personalized floor-plan recommendation</h2><p class="note">Recommendation uses the best currently advertised home in each layout: 35 points for relative asking rent and 65 for verified exposure, direct sunlight, view, floor band, and disturbance/privacy. Southeast is preferred; northwest homes with mountain shade receive a strong penalty. Individual listings remain private.</p><div class="panel"><table><thead><tr><th>Floor plan</th><th>Personal fit</th><th>Why</th><th>Inventory</th><th>Current min / median / max</th><th>Median $/sq ft</th><th>Median-rent change</th><th>Earliest move-in</th><th>Market signal</th></tr></thead><tbody>{''.join(table_rows) or '<tr><td colspan="9">Run the collector to create a complete inventory snapshot.</td></tr>'}</tbody></table></div></section>
+<section><h2>Personalized floor-plan recommendation</h2><p class="note">Recommendation uses the best currently advertised home in each layout: 35 points for relative asking rent and 65 for verified exposure, direct sunlight, pool-facing versus exterior facade, view, floor band, and disturbance/privacy. Southeast and the interior pool-facing facade are preferred; northwest homes with mountain shade receive a strong penalty. Individual listings remain private.</p><div class="plan-grid">{''.join(recommendation_cards) or '<article class="plan-card">Run the collector to create a complete inventory snapshot.</article>'}</div></section>
 <section><h2>Layout detail</h2><div class="controls"><label>Layout<select id="plan-selector"></select></label></div><div class="panel"><div class="detail-grid"><div><svg id="plan-chart" viewBox="0 0 700 235" role="img" aria-label="Minimum median and maximum advertised rent"></svg><p class="note">Minimum · median · maximum advertised rent; flat trends still draw lines and markers.</p><svg id="inventory-chart" viewBox="0 0 700 120" role="img" aria-label="Advertised listing count"></svg></div><div id="plan-summary"></div></div></div></section>
 <section><h2>How to use this</h2><p class="note">Start with Personal fit, then compare the rent range and market signal. A layout can have both strong and weak exposures; the score represents its best currently advertised, verified option, while the rated-home count shows coverage. Individual listings are intentionally not published. Disappearance only means no longer advertised, not leased. Floor bands come from a verified building layout and never expose exact floors.</p></section>
-<section id="scoring-methodology"><h2>Scoring methodology</h2><p class="note">The 100-point personal-fit score is intentionally transparent. It reflects the stated preference for southeast light and the observed northwest mountain shade. The layout row publishes the highest-scoring currently advertised, verified home without revealing its unit number.</p><div class="method-grid">
+<section id="scoring-methodology"><h2>Scoring methodology</h2><p class="note">The 100-point personal-fit score is intentionally transparent. It reflects the stated preference for southeast light, an interior pool-facing home, and the observed northwest mountain shade. Every advertised room is joined to the verified PDF catalog before scoring. The layout row publishes the highest-scoring current home without revealing its unit number.</p><div class="method-grid">
 <article class="method-card method-wide"><h3>Relative asking rent</h3><strong class="weight">35 points</strong><p>Compared only with other current homes in the same floor plan. Formula: round(clamp(28 − 1.4 × percent above the layout median, 14, 35)). At the median: 28; about 5% below: 35; 10% above: 14. This prevents a larger layout from winning simply because it is larger.</p></article>
 <article class="method-card"><h3>Exposure / direction</h3><strong class="weight">17 points</strong><p>SE {EXPOSURE_POINTS['SE']} · SW {EXPOSURE_POINTS['SW']} · NE {EXPOSURE_POINTS['NE']} · NW {EXPOSURE_POINTS['NW']} · unknown {EXPOSURE_POINTS['unknown']}.</p></article>
-<article class="method-card"><h3>Direct sunlight</h3><strong class="weight">13 points</strong><p>Good {SUNLIGHT_POINTS['good']} · mixed {SUNLIGHT_POINTS['mixed']} · low / mountain shade {SUNLIGHT_POINTS['low']} · unknown {SUNLIGHT_POINTS['unknown']}.</p></article>
-<article class="method-card"><h3>View</h3><strong class="weight">15 points</strong><p>Open skyline {VIEW_POINTS['skyline_open']} · partial skyline {VIEW_POINTS['skyline_partial']} · open {VIEW_POINTS['open']} · courtyard {VIEW_POINTS['courtyard']} · none {VIEW_POINTS['none']} · unknown {VIEW_POINTS['unknown']}.</p></article>
-<article class="method-card"><h3>Floor band</h3><strong class="weight">10 points</strong><p>Upper {FLOOR_BAND_POINTS['upper']} · mid-high {FLOOR_BAND_POINTS['mid_high']} · mid {FLOOR_BAND_POINTS['mid']} · low {FLOOR_BAND_POINTS['low']} · unknown {FLOOR_BAND_POINTS['unknown']}.</p></article>
-<article class="method-card"><h3>Disturbance / privacy</h3><strong class="weight">10 points</strong><p>Low disturbance {DISTURBANCE_POINTS['low']} · medium {DISTURBANCE_POINTS['medium']} · high / amenity-noise exposure {DISTURBANCE_POINTS['high']} · unknown {DISTURBANCE_POINTS['unknown']}.</p></article>
+<article class="method-card"><h3>Direct sunlight</h3><strong class="weight">10 points</strong><p>Good {SUNLIGHT_POINTS['good']} · mixed {SUNLIGHT_POINTS['mixed']} · low / mountain shade {SUNLIGHT_POINTS['low']} · unknown {SUNLIGHT_POINTS['unknown']}.</p></article>
+<article class="method-card"><h3>Pool-facing preference</h3><strong class="weight">12 points</strong><p>Interior / pool-facing {FACADE_POINTS['internal']} · exterior {FACADE_POINTS['external']} · unknown {FACADE_POINTS['unknown']}. This is an explicit personal preference, not a universal market premium.</p></article>
+<article class="method-card"><h3>View</h3><strong class="weight">9 points</strong><p>Open skyline {VIEW_POINTS['skyline_open']} · pool + partial skyline {VIEW_POINTS['pool_skyline_partial']} · partial skyline {VIEW_POINTS['skyline_partial']} · pool/courtyard {VIEW_POINTS['pool_courtyard']} · open {VIEW_POINTS['open']} · none {VIEW_POINTS['none']} · unknown {VIEW_POINTS['unknown']}.</p></article>
+<article class="method-card"><h3>Floor band</h3><strong class="weight">9 points</strong><p>Upper {FLOOR_BAND_POINTS['upper']} · mid-high {FLOOR_BAND_POINTS['mid_high']} · mid {FLOOR_BAND_POINTS['mid']} · low {FLOOR_BAND_POINTS['low']} · unknown {FLOOR_BAND_POINTS['unknown']}.</p></article>
+<article class="method-card"><h3>Disturbance / privacy</h3><strong class="weight">8 points</strong><p>Low disturbance {DISTURBANCE_POINTS['low']} · medium {DISTURBANCE_POINTS['medium']} · high / amenity-noise exposure {DISTURBANCE_POINTS['high']} · unknown {DISTURBANCE_POINTS['unknown']}. Pool activity remains a separate risk instead of canceling the pool-facing preference.</p></article>
 <article class="method-card"><h3>Floor-plan size</h3><strong class="weight">0 direct points</strong><p>Square footage and bedroom layout are shown for comparison but do not directly add points. Their cost is already handled through within-layout rent comparison.</p></article></div>
 <p class="note method-foot"><strong>Labels:</strong> Best match 82–100 · Strong 70–81 · Consider 58–69 · Low fit below 58. A home with no verified traits is not rated. “Unknown” values receive neutral partial credit only when a verified trait record exists.</p></section>
 </main><script id="plan-data" type="application/json">{json_for_script(plan_data)}</script><script>
 (()=>{{const plans=JSON.parse(document.querySelector('#plan-data').textContent),money=v=>new Intl.NumberFormat('en-US',{{style:'currency',currency:'USD',maximumFractionDigits:0}}).format(v/100),date=v=>new Date(v).toLocaleDateString(undefined,{{month:'short',day:'numeric'}}),make=(n,a)=>{{const e=document.createElementNS('http://www.w3.org/2000/svg',n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));return e}},label=(svg,attrs,value)=>{{const node=make('text',attrs);node.textContent=value;svg.append(node)}},path=(svg,points,field,klass,h=235,range=null)=>{{if(!points.length)return;const w=700,l=52,r=12,t=12,b=30,vs=points.map(p=>p[field]),lo=range?range.lo:Math.min(...vs),hi=range?range.hi:Math.max(...vs),x=i=>l+i*(w-l-r)/Math.max(points.length-1,1),y=v=>hi===lo?(t+h-b)/2:h-b-(v-lo)*(h-t-b)/(hi-lo);svg.append(make('polyline',{{points:points.map((p,i)=>`${{x(i).toFixed(1)}},${{y(p[field]).toFixed(1)}}`).join(' '),'class':klass}}));points.forEach((p,i)=>{{const dot=make('circle',{{cx:x(i),cy:y(p[field]),r:4,'class':'dot'}}),tooltip=make('title',{{}}),name=field==='units'?'Advertised listings':field[0].toUpperCase()+field.slice(1);tooltip.textContent=`${{date(p.timestamp)}} · ${{name}}: ${{field==='units'?p[field]:money(p[field])}}`;dot.append(tooltip);svg.append(dot)}});return {{lo,hi}}}};
-const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),ic=document.querySelector('#inventory-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();ic.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));path(ic,p.points,'units','line-med',120);const r=p.recommendation,reason=r.reasons.slice(0,3).join('; ');pSum.innerHTML=`<dl><dt>Personal fit</dt><dd>${{r.score===null?'—':r.score+'/100 · '+r.label}}</dd><dt>Why</dt><dd>${{reason}}</dd><dt>Rated current homes</dt><dd>${{r.rated_count}}/${{r.unit_count}}</dd><dt>Preferred southeast</dt><dd>${{r.preferred_count}}</dd><dt>Low-sun northwest</dt><dd>${{r.low_sun_count}}</dd><dt>Market signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
+const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),ic=document.querySelector('#inventory-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();ic.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));path(ic,p.points,'units','line-med',120);const r=p.recommendation,reason=r.reasons.slice(0,3).join('; ');pSum.innerHTML=`<dl><dt>Personal fit</dt><dd>${{r.score===null?'—':r.score+'/100 · '+r.label}}</dd><dt>Why</dt><dd>${{reason}}</dd><dt>Rated current homes</dt><dd>${{r.rated_count}}/${{r.unit_count}}</dd><dt>Preferred southeast</dt><dd>${{r.preferred_count}}</dd><dt>Pool-facing interior</dt><dd>${{r.pool_facing_count}}</dd><dt>Low-sun northwest</dt><dd>${{r.low_sun_count}}</dd><dt>Market signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
     output_file.write_text(document, encoding="utf-8")
