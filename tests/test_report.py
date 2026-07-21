@@ -6,6 +6,7 @@ from pathlib import Path
 from report import (
     apartment_snapshot_times,
     group_unit_history,
+    plan_recommendation,
     unit_history_data,
     unit_summary,
     generate_report,
@@ -87,21 +88,55 @@ class UnitHistoryTest(unittest.TestCase):
             directory = Path(directory)
             unit_file = directory / "unit_snapshots.csv"
             floorplan_file = directory / "unit_prices.csv"
+            traits_file = directory / "unit_traits.csv"
             output_file = directory / "report.html"
             self.write_csv(unit_file, self.rows)
             self.write_csv(floorplan_file, [floorplan(timestamp) for timestamp in self.timestamps])
+            self.write_csv(traits_file, [
+                {"unit_id": "UNIT-0704", "exposure": "SE", "sunlight": "good",
+                 "view": "skyline_partial", "floor_band": "mid_high",
+                 "disturbance": "medium", "confidence": "layout_plus_resident"},
+                {"unit_id": "UNIT-0804", "exposure": "NW", "sunlight": "low",
+                 "view": "none", "floor_band": "mid_high",
+                 "disturbance": "low", "confidence": "layout_plus_resident"},
+            ])
 
-            generate_report(floorplan_file, unit_file, output_file)
+            generate_report(floorplan_file, unit_file, output_file, traits_file=traits_file)
             report = output_file.read_text(encoding="utf-8")
 
         self.assertIn('id="plan-selector"', report)
-        self.assertIn("Floor-plan value comparison", report)
+        self.assertIn("Personalized floor-plan recommendation", report)
+        self.assertIn("preferred southeast exposure", report)
+        self.assertIn("Best current fit", report)
         self.assertIn("Layout 1", report)
         self.assertIn("Collecting history (3/7 days)", report)
         self.assertIn("How to use this", report)
         self.assertIn("rentValues=p.points.flatMap", report)
         self.assertIn("tooltip=make('title'", report)
         self.assertNotIn("UNIT-0704", report)
+        self.assertNotIn("UNIT-0804", report)
+
+    def test_recommendation_prefers_sunny_southeast_over_shaded_northwest(self):
+        peers = [
+            unit(self.timestamps[3], "sunny", "$3,600"),
+            unit(self.timestamps[3], "shaded", "$3,600"),
+        ]
+        traits = {
+            "sunny": {"exposure": "SE", "sunlight": "good", "view": "skyline_partial",
+                      "floor_band": "mid_high", "disturbance": "medium"},
+            "shaded": {"exposure": "NW", "sunlight": "low", "view": "none",
+                       "floor_band": "mid_high", "disturbance": "low"},
+        }
+        result = plan_recommendation(peers, traits)
+        self.assertEqual(result["exposure"], "SE")
+        self.assertGreaterEqual(result["score"], 82)
+        self.assertEqual(result["preferred_count"], 1)
+        self.assertEqual(result["low_sun_count"], 1)
+
+    def test_recommendation_degrades_safely_without_verified_traits(self):
+        result = plan_recommendation([unit(self.timestamps[3], "unknown", "$3,600")], {})
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["label"], "Not rated")
 
     @staticmethod
     def write_csv(path, rows):

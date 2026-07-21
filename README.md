@@ -10,6 +10,8 @@ The tracker records:
 - floor plan, square footage, move-in date, and advertised starting rent
 - anonymized listing key, rent, availability date, and anonymized layout ID
 - UTC snapshot timestamp
+- personalized, layout-level recommendation inputs from an anonymous verified
+  unit-traits table (exposure, sunlight, view, floor band, and disturbance risk)
 
 For the durable product context—privacy boundaries, data definitions, decision
 interpretation, and the deployment runbook—see
@@ -27,7 +29,8 @@ python3 -m venv .venv
 .venv/bin/python scraper.py --no-sheets
 ```
 
-Each complete run updates five local files:
+The tracker uses these six local files; each complete run regenerates the five
+history/report files while retaining the verified traits table:
 
 - `data/unit_prices.csv`: floor-plan price history
 - `data/unit_snapshots.csv`: anonymized individual-listing history, retained only
@@ -36,8 +39,12 @@ Each complete run updates five local files:
   rent, rent per square foot, newly visible units, and price reductions
 - `data/scrape_runs.csv`: complete collection-run coverage, used to distinguish
   an absent advertisement from a failed or partial scrape
+- `data/unit_traits.csv`: anonymous, verified unit characteristics used only to
+  calculate layout-level recommendations; it contains no apartment numbers or
+  exact floors
 - `data/report.html`: an anonymous layout market dashboard with inventory, asking-rent,
-  rent-per-square-foot, and renter-timing signals; it never publishes individual listings
+  rent-per-square-foot, renter-timing signals, and personalized fit; it never
+  publishes individual listings
 
 On later runs, the terminal reports every floor-plan price increase or decrease
 compared with the last saved price. Open the dashboard after a run:
@@ -79,6 +86,13 @@ GitHub Actions runs the standard-library collector every day at `13:00 UTC`
 (9 AM during Toronto daylight time, 8 AM during standard time). It commits the
 anonymized histories, derived aggregates, and regenerated report back to the repository, then deploys
 the report to GitHub Pages.
+
+The recommendation score is regenerated automatically on every run. It assigns
+35 points to a currently advertised home's rent relative to its layout peers
+and 65 points to verified exposure, direct sunlight, view, floor band, and
+disturbance/privacy. The public layout score is the best verified current option
+for that layout; coverage is shown so an unrated new listing is never silently
+treated as average.
 
 Before the first remote run, push the repository changes to GitHub and enable
 **Settings -> Pages -> Source: GitHub Actions** in the GitHub repository. Also

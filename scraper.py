@@ -60,6 +60,7 @@ FLOORPLAN_DAILY_FIELDS = [
 ]
 SCRAPE_RUNS_FILE = Path("data/scrape_runs.csv")
 SCRAPE_RUNS_FIELDS = ["timestamp", "apartment", "status", "floorplan_count", "unit_count"]
+UNIT_TRAITS_FILE = Path("data/unit_traits.csv")
 REPORT_FILE = Path("data/report.html")
 PRICE_PATTERN = re.compile(r"^\$?[\d,]+(?:\.\d{1,2})?$")
 
@@ -564,11 +565,11 @@ def main() -> None:
         anonymize_history_file(UNIT_CSV_FILE, UNIT_CSV_FIELDS)
         anonymize_history_file(FLOORPLAN_DAILY_FILE, FLOORPLAN_DAILY_FIELDS)
         anonymize_history_file(SCRAPE_RUNS_FILE, SCRAPE_RUNS_FIELDS)
-        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE)
+        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE, UNIT_TRAITS_FILE)
         print(f"[INFO] Updated anonymized report at {REPORT_FILE}.")
         return
     if args.report_only:
-        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE)
+        generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE, UNIT_TRAITS_FILE)
         print(f"[INFO] Updated local report at {REPORT_FILE}.")
         return
 
@@ -593,7 +594,7 @@ def main() -> None:
     save_rows_csv(unit_details, UNIT_CSV_FILE, UNIT_CSV_FIELDS)
     save_rows_csv(daily_rows, FLOORPLAN_DAILY_FILE, FLOORPLAN_DAILY_FIELDS)
     save_rows_csv(runs, SCRAPE_RUNS_FILE, SCRAPE_RUNS_FIELDS)
-    generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE)
+    generate_report(CSV_FILE, UNIT_CSV_FILE, REPORT_FILE, FLOORPLAN_DAILY_FILE, SCRAPE_RUNS_FILE, UNIT_TRAITS_FILE)
     print(f"[INFO] Updated local report at {REPORT_FILE}.")
     if not args.no_sheets:
         update_google_sheet(units)
