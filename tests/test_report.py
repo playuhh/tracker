@@ -108,6 +108,8 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertIn("Personalized floor-plan recommendation", report)
         self.assertIn("preferred southeast exposure", report)
         self.assertIn("Best current fit", report)
+        self.assertIn('class="fit-stack"', report)
+        self.assertIn('class="signal market-signal neutral"', report)
         self.assertIn("Layout 1", report)
         self.assertIn("Collecting history (3/7 days)", report)
         self.assertIn("How to use this", report)
