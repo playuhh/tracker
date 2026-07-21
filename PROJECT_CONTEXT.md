@@ -54,6 +54,12 @@ that layout's recorded square footage.
   pool-facing interior facade, and observed sunlight. Northwest exposure with
   mountain shade is penalized. Pool activity/noise remains a separate risk.
   These are personal-fit weights, not a universal market valuation model.
+- Floor 5 is the minimum: below-floor-5 homes are excluded whenever a layout
+  has an eligible current alternative. Floors 5–6 are acceptable but capped
+  below `Best match`; floor 7+ is preferred.
+- Never infer a Manhattan/skyline view from direction alone. The current model
+  requires floor 7+ and appropriate facade geometry; resident confirmation is
+  stronger evidence and must be labeled separately from modeled geometry.
 - A flat chart is valid: the same advertised prices can persist across several
   snapshots.
 

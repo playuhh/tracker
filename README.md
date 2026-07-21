@@ -97,6 +97,12 @@ published at the bottom of the dashboard. The public layout score is the best
 verified current option for that layout; coverage is shown so an unrated new
 listing is never silently treated as average.
 
+Floor 5 is a hard minimum when an eligible home exists, floors 5–6 are
+acceptable but cannot receive `Best match`, and floor 7+ is preferred. A
+skyline label also requires floor 7+; exposure alone is not treated as proof of
+a Manhattan view. The private catalog distinguishes PDF/geometry modeling from
+resident-confirmed evidence.
+
 Before the first remote run, push the repository changes to GitHub and enable
 **Settings -> Pages -> Source: GitHub Actions** in the GitHub repository. Also
 add the page ID as the repository

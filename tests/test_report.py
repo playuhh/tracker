@@ -120,6 +120,8 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertIn("17 points", report)
         self.assertIn("Pool-facing preference", report)
         self.assertIn("12 points", report)
+        self.assertIn("Floor requirement", report)
+        self.assertIn("Floor 5 is the minimum", report)
         self.assertIn("Floor-plan size", report)
         self.assertIn("0 direct points", report)
         self.assertIn("Best match 82–100", report)
@@ -150,6 +152,22 @@ class UnitHistoryTest(unittest.TestCase):
         result = plan_recommendation([unit(self.timestamps[3], "unknown", "$3,600")], {})
         self.assertIsNone(result["score"])
         self.assertEqual(result["label"], "Not rated")
+
+    def test_floor_minimum_excludes_lower_home_when_eligible_home_exists(self):
+        peers = [
+            unit(self.timestamps[3], "low-se", "$3,500"),
+            unit(self.timestamps[3], "floor-five", "$3,600"),
+        ]
+        traits = {
+            "low-se": {"exposure": "SE", "sunlight": "good", "facade": "internal",
+                       "view": "pool_courtyard", "floor_band": "low", "disturbance": "medium"},
+            "floor-five": {"exposure": "NW", "sunlight": "low", "facade": "external",
+                           "view": "none", "floor_band": "mid", "disturbance": "low"},
+        }
+        result = plan_recommendation(peers, traits)
+        self.assertEqual(result["floor_status"], "acceptable")
+        self.assertLessEqual(result["score"], 81)
+        self.assertEqual(result["eligible_floor_count"], 1)
 
     @staticmethod
     def write_csv(path, rows):
