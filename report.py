@@ -14,6 +14,19 @@ from typing import Iterable
 
 UnitKey = tuple[str, str, str]
 
+EXPOSURE_POINTS = {"SE": 17, "SW": 11, "NE": 8, "NW": 1, "unknown": 7}
+SUNLIGHT_POINTS = {"good": 13, "mixed": 7, "low": 0, "unknown": 5}
+VIEW_POINTS = {
+    "skyline_open": 15,
+    "skyline_partial": 10,
+    "open": 7,
+    "courtyard": 2,
+    "none": 1,
+    "unknown": 4,
+}
+FLOOR_BAND_POINTS = {"low": 3, "mid": 5, "mid_high": 8, "upper": 10, "unknown": 5}
+DISTURBANCE_POINTS = {"low": 10, "medium": 6, "high": 2, "unknown": 5}
+
 
 def read_rows(filename: Path) -> list[dict[str, str]]:
     if not filename.exists():
@@ -38,6 +51,104 @@ def int_value(value: str, default: int = 0) -> int:
         return int(value.replace(",", ""))
     except (AttributeError, ValueError):
         return default
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def recommendation_label(score: int) -> tuple[str, str]:
+    if score >= 82:
+        return "Best match", "good"
+    if score >= 70:
+        return "Strong", "good"
+    if score >= 58:
+        return "Consider", "neutral"
+    return "Low fit", "bad"
+
+
+def unit_recommendation(
+    unit: dict[str, str], peers: list[dict[str, str]], traits: dict[str, dict[str, str]],
+) -> dict[str, object] | None:
+    """Score one current listing without exposing it in the public report.
+
+    Price contributes 35 points. Orientation, observed solar access, view,
+    verified floor band, and disturbance/privacy contribute 65 points.
+    """
+    trait = traits.get(unit["unit_id"])
+    if not trait:
+        return None
+    peer_prices = [price_to_cents(row["price"]) for row in peers]
+    baseline = int(median(peer_prices))
+    rent = price_to_cents(unit["price"])
+    percent_above = (rent - baseline) / baseline * 100 if baseline else 0
+    price_points = round(clamp(28 - percent_above * 1.4, 14, 35))
+    exposure = trait.get("exposure", "unknown")
+    sunlight = trait.get("sunlight", "unknown")
+    view = trait.get("view", "unknown")
+    floor_band = trait.get("floor_band", "unknown")
+    disturbance = trait.get("disturbance", "unknown")
+    fit_points = (
+        EXPOSURE_POINTS.get(exposure, EXPOSURE_POINTS["unknown"])
+        + SUNLIGHT_POINTS.get(sunlight, SUNLIGHT_POINTS["unknown"])
+        + VIEW_POINTS.get(view, VIEW_POINTS["unknown"])
+        + FLOOR_BAND_POINTS.get(floor_band, FLOOR_BAND_POINTS["unknown"])
+        + DISTURBANCE_POINTS.get(disturbance, DISTURBANCE_POINTS["unknown"])
+    )
+    score = int(price_points + fit_points)
+    label, css_class = recommendation_label(score)
+    reasons = []
+    if exposure == "SE":
+        reasons.append("preferred southeast exposure")
+    elif exposure == "NW":
+        reasons.append("northwest exposure")
+    if sunlight == "good":
+        reasons.append("good direct-light potential")
+    elif sunlight == "low":
+        reasons.append("mountain shade / little direct sun")
+    if view == "skyline_open":
+        reasons.append("open skyline view")
+    elif view == "skyline_partial":
+        reasons.append("partial skyline view")
+    elif view == "courtyard":
+        reasons.append("courtyard-facing")
+    if floor_band in {"mid_high", "upper"}:
+        reasons.append("better vertical clearance")
+    if disturbance == "high":
+        reasons.append("amenity/noise exposure")
+    if price_points >= 32:
+        reasons.append("priced below layout peers")
+    return {
+        "score": score,
+        "label": label,
+        "class": css_class,
+        "price_points": price_points,
+        "fit_points": fit_points,
+        "exposure": exposure,
+        "sunlight": sunlight,
+        "reasons": reasons,
+    }
+
+
+def plan_recommendation(
+    units: list[dict[str, str]], traits: dict[str, dict[str, str]],
+) -> dict[str, object]:
+    """Aggregate private listing traits into a layout-first recommendation."""
+    scored = [result for unit in units if (result := unit_recommendation(unit, units, traits))]
+    if not scored:
+        return {"score": None, "median_score": None, "label": "Not rated", "class": "neutral",
+                "rated_count": 0, "unit_count": len(units), "preferred_count": 0,
+                "low_sun_count": 0, "reasons": ["no verified orientation data yet"]}
+    best = max(scored, key=lambda result: int(result["score"]))
+    scores = [int(result["score"]) for result in scored]
+    return {
+        **best,
+        "median_score": int(median(scores)),
+        "rated_count": len(scored),
+        "unit_count": len(units),
+        "preferred_count": sum(result["exposure"] == "SE" for result in scored),
+        "low_sun_count": sum(result["sunlight"] == "low" for result in scored),
+    }
 
 
 def move_in_sort_key(value: str) -> tuple[int, str]:
@@ -195,11 +306,13 @@ def fallback_daily_rows(unit_rows: list[dict[str, str]]) -> list[dict[str, str]]
 def generate_report(
     floorplan_file: Path, unit_file: Path, output_file: Path,
     daily_file: Path | None = None, runs_file: Path | None = None,
+    traits_file: Path | None = None,
 ) -> None:
     """Build the floor-plan-first dashboard; raw snapshots remain authoritative."""
     floorplan_history, unit_history = read_rows(floorplan_file), read_rows(unit_file)
     daily_history = read_rows(daily_file) if daily_file else []
     runs = read_rows(runs_file) if runs_file else []
+    traits = {row["unit_id"]: row for row in read_rows(traits_file)} if traits_file else {}
     if not daily_history:
         daily_history = fallback_daily_rows(unit_history)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -241,14 +354,23 @@ def generate_report(
         low_units = [row for row in current_units if (row["apartment"], row["floorplan_id"]) == key]
         low = min(low_units, key=lambda row: price_to_cents(row["price"]), default=None)
         available_now = sum(row["move_in"].casefold() in {"immediate", "now"} for row in low_units)
+        recommendation = plan_recommendation(low_units, traits)
         item = {"key": f"layout-{index}", "layout": f"Layout {index}", "sqft": latest["sqft"],
                 "points": points, "available_now": available_now, "low_rent": low["price"] if low else None,
-                "signal": signal, "history_count": len(points), "coverage_days": coverage_days}
+                "signal": signal, "history_count": len(points), "coverage_days": coverage_days,
+                "recommendation": recommendation}
         plan_data.append(item)
         changes = f"7d {format_cents(change7, True)} / 30d {format_cents(change30, True)}"
         inventory = f"{latest['visible_units']} <small>7d {inventory7 if inventory7 is not None else '—'} / 30d {inventory30 if inventory30 is not None else '—'}</small>"
+        score = recommendation["score"]
+        score_display = "—" if score is None else f"{score}/100"
+        reasons = "; ".join(str(reason) for reason in recommendation["reasons"][:3])
+        fit = (f'<strong class="score">{score_display}</strong><br>'
+               f'<span class="signal {recommendation["class"]}">{recommendation["label"]}</span><br>'
+               f'<small>{recommendation["rated_count"]}/{recommendation["unit_count"]} current homes rated</small>')
         table_rows.append("<tr>" +
             f"<td><button class=\"plan-link\" data-plan=\"{html.escape(item['key'], quote=True)}\">{item['layout']}</button><br><small>{html.escape(latest['sqft'])} sq ft</small></td>" +
+            f"<td>{fit}</td><td>{html.escape(reasons)}</td>" +
             f"<td>{inventory}</td><td><strong>{html.escape(latest['min_rent'])}</strong> / {html.escape(latest['median_rent'])} / {html.escape(latest['max_rent'])}</td>" +
             f"<td>{html.escape(latest['median_rent_per_sqft']) or '—'}</td><td>{changes}</td>" +
             f"<td>{html.escape(latest['earliest_move_in'])}</td><td><span class=\"signal {signal_class}\">{signal}</span></td></tr>")
@@ -267,14 +389,18 @@ def generate_report(
     market_7_rent, market_30_rent = window_change(market_points, "median", 7), window_change(market_points, "median", 30)
 
     latest_timestamp = max((row["timestamp"] for row in current_daily), default="No complete snapshots yet")
+    rated_plans = [plan for plan in plan_data if plan["recommendation"]["score"] is not None]
+    best_plan = max(rated_plans, key=lambda plan: int(plan["recommendation"]["score"])) if rated_plans else None
+    best_fit = (f'{best_plan["layout"]} · {best_plan["recommendation"]["score"]}/100'
+                if best_plan else "Collecting traits")
     document = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rental Market Tracker</title>
-<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1240px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font: .72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:auto}}table{{border-collapse:collapse;width:100%;min-width:1040px;font: .81rem ui-monospace,monospace}}th,td{{padding:13px 15px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}}th{{color:var(--muted);font-size:.68rem;text-transform:uppercase}}tr:last-child td{{border:0}}button{{font:inherit;color:inherit}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline}}.signal{{font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:9px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:1fr 280px;gap:10px;padding:16px}}svg{{display:block;width:100%;height:235px}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}dl{{display:grid;grid-template-columns:1fr auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right}}@media(max-width:760px){{main{{padding:32px 12px}}.summary,.detail-grid{{grid-template-columns:1fr}}select{{width:100%}}}}</style></head><body><main>
+<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1380px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font: .72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:auto}}table{{border-collapse:collapse;width:100%;min-width:1220px;font: .81rem ui-monospace,monospace}}th,td{{padding:13px 15px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}}th{{color:var(--muted);font-size:.68rem;text-transform:uppercase}}tr:last-child td{{border:0}}button{{font:inherit;color:inherit}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline}}.score{{display:inline-block;font-size:1.2rem;margin-bottom:7px}}.signal{{font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:9px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:1fr 320px;gap:10px;padding:16px}}svg{{display:block;width:100%;height:235px}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}dl{{display:grid;grid-template-columns:1fr auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right;max-width:180px}}@media(max-width:900px){{main{{padding:32px 12px}}.summary,.detail-grid{{grid-template-columns:1fr}}select{{width:100%}}}}</style></head><body><main>
 <p class="eyebrow">Anonymous building / advertised inventory</p><h1>Rental Market</h1><p class="note">Latest complete snapshot: {html.escape(latest_timestamp)}. All prices are advertised rents, not executed lease prices.</p>
-<div class="summary"><div class="metric"><span class="eyebrow">Advertised units</span><strong>{latest_market['units']}</strong><small>7d {market_7_units if market_7_units is not None else '—'} / 30d {market_30_units if market_30_units is not None else '—'}</small></div><div class="metric"><span class="eyebrow">Available floor plans</span><strong>{len(plan_data)}</strong><small>current complete run</small></div><div class="metric"><span class="eyebrow">Median advertised rent</span><strong>{format_cents(latest_market['median']) if market_points else '—'}</strong><small>7d {format_cents(market_7_rent, True)} / 30d {format_cents(market_30_rent, True)}</small></div><div class="metric"><span class="eyebrow">Visible price reductions</span><strong>{latest_market['reductions']}</strong><small>vs. prior observed price</small></div></div>
-<section><h2>Floor-plan value comparison</h2><p class="note">Signals are descriptive, not predictions. Window changes require enough complete daily observations.</p><div class="panel"><table><thead><tr><th>Floor plan</th><th>Inventory</th><th>Current min / median / max</th><th>Median $/sq ft</th><th>Median-rent change</th><th>Earliest move-in</th><th>Renter signal</th></tr></thead><tbody>{''.join(table_rows) or '<tr><td colspan="7">Run the collector to create a complete inventory snapshot.</td></tr>'}</tbody></table></div></section>
+<div class="summary"><div class="metric"><span class="eyebrow">Advertised units</span><strong>{latest_market['units']}</strong><small>7d {market_7_units if market_7_units is not None else '—'} / 30d {market_30_units if market_30_units is not None else '—'}</small></div><div class="metric"><span class="eyebrow">Available floor plans</span><strong>{len(plan_data)}</strong><small>current complete run</small></div><div class="metric"><span class="eyebrow">Best current fit</span><strong>{best_fit}</strong><small>best rated home, layout-level display</small></div><div class="metric"><span class="eyebrow">Median advertised rent</span><strong>{format_cents(latest_market['median']) if market_points else '—'}</strong><small>7d {format_cents(market_7_rent, True)} / 30d {format_cents(market_30_rent, True)}</small></div><div class="metric"><span class="eyebrow">Visible price reductions</span><strong>{latest_market['reductions']}</strong><small>vs. prior observed price</small></div></div>
+<section><h2>Personalized floor-plan recommendation</h2><p class="note">Recommendation uses the best currently advertised home in each layout: 35 points for relative asking rent and 65 for verified exposure, direct sunlight, view, floor band, and disturbance/privacy. Southeast is preferred; northwest homes with mountain shade receive a strong penalty. Individual listings remain private.</p><div class="panel"><table><thead><tr><th>Floor plan</th><th>Personal fit</th><th>Why</th><th>Inventory</th><th>Current min / median / max</th><th>Median $/sq ft</th><th>Median-rent change</th><th>Earliest move-in</th><th>Market signal</th></tr></thead><tbody>{''.join(table_rows) or '<tr><td colspan="9">Run the collector to create a complete inventory snapshot.</td></tr>'}</tbody></table></div></section>
 <section><h2>Layout detail</h2><div class="controls"><label>Layout<select id="plan-selector"></select></label></div><div class="panel"><div class="detail-grid"><div><svg id="plan-chart" viewBox="0 0 700 235" role="img" aria-label="Minimum median and maximum advertised rent"></svg><p class="note">Minimum · median · maximum advertised rent; flat trends still draw lines and markers.</p><svg id="inventory-chart" viewBox="0 0 700 120" role="img" aria-label="Advertised listing count"></svg></div><div id="plan-summary"></div></div></div></section>
-<section><h2>How to use this</h2><p class="note">Choose a layout using price per square foot, its median-rent and inventory direction, and your move-in deadline. Individual listings are intentionally not published: disappearance only means no longer advertised, not leased. Floor-level comparisons are withheld until the inventory source provides a reliable floor field.</p></section>
+<section><h2>How to use this</h2><p class="note">Start with Personal fit, then compare the rent range and market signal. A layout can have both strong and weak exposures; the score represents its best currently advertised, verified option, while the rated-home count shows coverage. Individual listings are intentionally not published. Disappearance only means no longer advertised, not leased. Floor bands come from a verified building layout and never expose exact floors.</p></section>
 </main><script id="plan-data" type="application/json">{json_for_script(plan_data)}</script><script>
 (()=>{{const plans=JSON.parse(document.querySelector('#plan-data').textContent),money=v=>new Intl.NumberFormat('en-US',{{style:'currency',currency:'USD',maximumFractionDigits:0}}).format(v/100),date=v=>new Date(v).toLocaleDateString(undefined,{{month:'short',day:'numeric'}}),make=(n,a)=>{{const e=document.createElementNS('http://www.w3.org/2000/svg',n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));return e}},label=(svg,attrs,value)=>{{const node=make('text',attrs);node.textContent=value;svg.append(node)}},path=(svg,points,field,klass,h=235,range=null)=>{{if(!points.length)return;const w=700,l=52,r=12,t=12,b=30,vs=points.map(p=>p[field]),lo=range?range.lo:Math.min(...vs),hi=range?range.hi:Math.max(...vs),x=i=>l+i*(w-l-r)/Math.max(points.length-1,1),y=v=>hi===lo?(t+h-b)/2:h-b-(v-lo)*(h-t-b)/(hi-lo);svg.append(make('polyline',{{points:points.map((p,i)=>`${{x(i).toFixed(1)}},${{y(p[field]).toFixed(1)}}`).join(' '),'class':klass}}));points.forEach((p,i)=>{{const dot=make('circle',{{cx:x(i),cy:y(p[field]),r:4,'class':'dot'}}),tooltip=make('title',{{}}),name=field==='units'?'Advertised listings':field[0].toUpperCase()+field.slice(1);tooltip.textContent=`${{date(p.timestamp)}} · ${{name}}: ${{field==='units'?p[field]:money(p[field])}}`;dot.append(tooltip);svg.append(dot)}});return {{lo,hi}}}};
-const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),ic=document.querySelector('#inventory-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();ic.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));path(ic,p.points,'units','line-med',120);pSum.innerHTML=`<dl><dt>Signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
+const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),ic=document.querySelector('#inventory-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();ic.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));path(ic,p.points,'units','line-med',120);const r=p.recommendation,reason=r.reasons.slice(0,3).join('; ');pSum.innerHTML=`<dl><dt>Personal fit</dt><dd>${{r.score===null?'—':r.score+'/100 · '+r.label}}</dd><dt>Why</dt><dd>${{reason}}</dd><dt>Rated current homes</dt><dd>${{r.rated_count}}/${{r.unit_count}}</dd><dt>Preferred southeast</dt><dd>${{r.preferred_count}}</dd><dt>Low-sun northwest</dt><dd>${{r.low_sun_count}}</dd><dt>Market signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
     output_file.write_text(document, encoding="utf-8")

@@ -13,8 +13,9 @@ identify a particular building or unit.
   variable or GitHub repository secret). Never commit its value.
 - Treat an advertisement disappearing as **no longer advertised**, not proof
   that it was rented. Listings may be withdrawn, edited, or temporarily hidden.
-- Do not infer a floor from an apartment/listing label. Add floor-level analysis
-  only when the source provides a reliable, explicit floor field.
+- Do not infer a floor from an apartment/listing label alone. Verified building
+  layout metadata may supply an anonymous floor band, but exact floors and the
+  source mapping must never be persisted or published.
 - Individual listing snapshots exist solely to derive aggregates. The public
   report must remain layout-first and must not expose a browsable unit list.
 
@@ -31,6 +32,7 @@ look like inventory disappearing.
 | `data/unit_snapshots.csv` | Pseudonymized listing observations used for calculations |
 | `data/floorplan_daily.csv` | Daily layout aggregates: inventory, min/median/max rent, $/sq ft, new visibility, and reductions |
 | `data/scrape_runs.csv` | Successful-run coverage used to separate missing data from absent listings |
+| `data/unit_traits.csv` | Anonymous verified exposure, sunlight, view, floor-band, and disturbance inputs |
 | `data/report.html` | Public anonymous renter dashboard |
 
 The current min / median / max values describe **all listings visible in the
@@ -48,6 +50,9 @@ that layout's recorded square footage.
 - Inventory rising, new listings appearing, or observed price reductions can
   strengthen a renter's position; low inventory or earlier move-in dates can
   imply urgency. These are decision aids, not predictions of final lease price.
+- Personalized fit uses a renter-specific preference for southeast exposure and
+  observed sunlight. Northwest exposure with mountain shade is penalized. It is
+  separate from the market timing signal and is not a universal valuation model.
 - A flat chart is valid: the same advertised prices can persist across several
   snapshots.
 
@@ -60,6 +65,9 @@ that layout's recorded square footage.
   inventory chart uses the same behaviour for listing counts.
 - The report calls only complete snapshot days usable history; it does not fill
   gaps with assumed values.
+- The layout recommendation uses the best verified current option and publishes
+  only aggregate counts and reasons. It never exposes which listing produced the
+  score. Unknown traits remain explicitly unrated.
 
 ## Operating runbook
 
@@ -99,4 +107,3 @@ writing observations.
    or private planning notes.
 4. For public-facing changes, trigger the workflow and verify its GitHub Pages
    result.
-
