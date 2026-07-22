@@ -12,7 +12,7 @@ The tracker records:
 - UTC snapshot timestamp
 - personalized, layout-level recommendation inputs from an anonymous verified
   residence catalog (exposure, pool-facing/exterior facade, sunlight, view,
-  floor band, and disturbance risk)
+  floor band, disturbance risk, and reviewed floor-plan geometry)
 
 For the durable product context—privacy boundaries, data definitions, decision
 interpretation, and the deployment runbook—see
@@ -102,6 +102,33 @@ stops remaining requests, and prevents history writes. No alternate endpoint is
 attempted. See [the compatibility notes](docs/portfolio-compatibility.md) before
 adding another property.
 
+## Private floor-plan geometry catalog
+
+`floorplan_catalog.py` discovers one- and two-bedroom image assets whose media
+names contain `Floorplan_A#` or `Floorplan_B#`, removes thumbnail query strings,
+caches the canonical images under ignored `private/floorplans/`, and records a
+SHA-256 digest in ignored `private/floorplan_catalog.csv`. A suffix such as
+`B6(1).png` is normalized to plan `B6`. The image URL pattern is useful for
+refreshing known assets, but the gallery remains the discovery source because
+not every plan uses an identical filename.
+
+When the public gallery does not permit a standard HTTP page fetch, save its
+rendered image elements to ignored `private/floorplan_source.html`, then run:
+
+```bash
+python3 floorplan_catalog.py \
+  --html-file private/floorplan_source.html \
+  --reviews-file private/floorplan_reviews.csv
+UNIT_ID_HASH_KEY="a-private-random-string-with-at-least-32-characters" \
+  python3 catalog.py
+```
+
+Manual reviews use `preferred`, `acceptable`, or `penalized`, and separately
+classify circulation/usable-space efficiency. Refreshes preserve
+reviews (or apply the review override file), while the anonymous public unit
+traits inherit only geometry, fit, and review confidence—not source URLs,
+images, notes, room numbers, or exact floors.
+
 ## Google Sheets (optional)
 
 The collector works without Google credentials. To append each floor-plan
@@ -140,6 +167,10 @@ view, floor band, and disturbance/privacy. The weights and point values are
 published at the bottom of the dashboard. The public layout score is the best
 verified current option for that layout; coverage is shown so an unrated new
 listing is never silently treated as average.
+
+Irregular geometry alone contributes no penalty. A usable but mildly awkward
+plan deducts 4 points; substantial circulation or hard-to-use space deducts 15.
+This is not a gate, so price and stronger residence traits can offset it.
 
 Floor 5 is a hard minimum when an eligible home exists, floors 5–6 are
 acceptable but cannot receive `Best match`, and floor 7+ is preferred. A

@@ -35,7 +35,7 @@ look like inventory disappearing.
 | `data/unit_snapshots.csv` | Pseudonymized listing observations used for calculations |
 | `data/floorplan_daily.csv` | Daily layout aggregates: inventory, min/median/max rent, $/sq ft, new visibility, and reductions |
 | `data/scrape_runs.csv` | Successful-run coverage used to separate missing data from absent listings |
-| `data/unit_traits.csv` | Anonymous per-residence exposure, facade, pool-facing, sunlight, view, floor-band, and disturbance inputs |
+| `data/unit_traits.csv` | Anonymous per-residence exposure, facade, pool-facing, sunlight, view, floor-band, disturbance, and reviewed layout-fit inputs |
 | `data/report.html` | Public anonymous renter dashboard |
 
 The current min / median / max values describe **all listings visible in the
@@ -60,6 +60,10 @@ that layout's recorded square footage.
 - Floor 5 is the minimum: below-floor-5 homes are excluded whenever a layout
   has an eligible current alternative. Floors 5–6 are acceptable but capped
   below `Best match`; floor 7+ is preferred.
+- Irregular floor-plan geometry alone is not a deal breaker. A reviewed layout
+  with modest inefficiency deducts 4 points; substantial circulation or
+  hard-to-use space deducts 15. The penalty is not an exclusion and can be
+  offset by rent, exposure, floor, or view.
 - Never infer a Manhattan/skyline view from direction alone. The current model
   requires floor 7+ and appropriate facade geometry; resident confirmation is
   stronger evidence and must be labeled separately from modeled geometry.

@@ -29,6 +29,7 @@ VIEW_POINTS = {
 }
 FLOOR_BAND_POINTS = {"low": 0, "mid": 3, "mid_high": 7, "upper": 9, "unknown": 4}
 DISTURBANCE_POINTS = {"low": 8, "medium": 6, "high": 2, "unknown": 5}
+LAYOUT_PENALTIES = {"preferred": 0, "acceptable": 4, "penalized": 15, "unknown": 0}
 STALE_THRESHOLD_HOURS = 36
 
 
@@ -78,6 +79,7 @@ def unit_recommendation(
 
     Price contributes 35 points. Orientation, observed solar access, facade
     context, view, verified floor band, and disturbance/privacy contribute 65 points.
+    Floor-plan efficiency can deduct up to 15 points without excluding a home.
     """
     trait = traits.get(unit["unit_id"])
     if not trait:
@@ -93,6 +95,7 @@ def unit_recommendation(
     view = trait.get("view", "unknown")
     floor_band = trait.get("floor_band", "unknown")
     disturbance = trait.get("disturbance", "unknown")
+    layout_fit = trait.get("layout_fit", "unknown")
     raw_confidence = trait.get("confidence", "unknown").casefold()
     confidence = (
         "verified" if "resident" in raw_confidence or raw_confidence == "verified"
@@ -108,18 +111,30 @@ def unit_recommendation(
         + DISTURBANCE_POINTS.get(disturbance, DISTURBANCE_POINTS["unknown"])
     )
     raw_score = int(price_points + fit_points)
+    layout_penalty = LAYOUT_PENALTIES.get(layout_fit, 0)
+    adjusted_score = max(0, raw_score - layout_penalty)
     if floor_band == "low":
-        score, label, css_class = min(raw_score, 57), "Below floor minimum", "bad"
+        score, label, css_class = min(adjusted_score, 57), "Below floor minimum", "bad"
         floor_status = "below_minimum"
     elif floor_band == "mid":
-        score = min(raw_score, 81)
+        score = min(adjusted_score, 81)
         label, css_class = recommendation_label(score)
         floor_status = "acceptable"
     else:
-        score = raw_score
+        score = adjusted_score
         label, css_class = recommendation_label(score)
         floor_status = "preferred" if floor_band in {"mid_high", "upper"} else "unknown"
+    if layout_fit in {"preferred", "acceptable", "penalized"}:
+        layout_status = layout_fit
+    else:
+        layout_status = "unknown"
     reasons = []
+    if layout_fit == "penalized":
+        reasons.append("substantial circulation or unusable-space penalty")
+    elif layout_fit == "preferred":
+        reasons.append("regular, furniture-friendly floor plan")
+    elif layout_fit == "acceptable":
+        reasons.append("usable floor-plan shape")
     if exposure == "SE":
         reasons.append("preferred southeast exposure")
     elif exposure == "NW":
@@ -153,10 +168,12 @@ def unit_recommendation(
         "price_points": price_points,
         "fit_points": fit_points,
         "raw_score": raw_score,
+        "layout_penalty": layout_penalty,
         "exposure": exposure,
         "facade": facade,
         "sunlight": sunlight,
         "floor_status": floor_status,
+        "layout_status": layout_status,
         "reasons": reasons,
         "confidence": confidence,
     }
@@ -172,6 +189,7 @@ def plan_recommendation(
                 "rated_count": 0, "unit_count": len(units), "preferred_count": 0,
                 "pool_facing_count": 0, "eligible_floor_count": 0,
                 "preferred_floor_count": 0, "low_sun_count": 0,
+                "non_penalized_layout_count": 0,
                 "confidence": "unknown", "trait_status": "not_evaluated",
                 "reasons": ["Personal fit unavailable — no verified property traits"]}
     eligible = [result for result in scored if result["floor_status"] != "below_minimum"]
@@ -187,6 +205,9 @@ def plan_recommendation(
         "eligible_floor_count": sum(result["floor_status"] != "below_minimum" for result in scored),
         "preferred_floor_count": sum(result["floor_status"] == "preferred" for result in scored),
         "low_sun_count": sum(result["sunlight"] == "low" for result in scored),
+        "non_penalized_layout_count": sum(
+            result["layout_status"] != "penalized" for result in scored
+        ),
         "trait_status": "evaluated",
     }
 
@@ -503,9 +524,9 @@ def generate_report(
 <style>.line-min{{stroke-dasharray:2 5}}.line-max{{stroke-dasharray:8 5}}</style>
 <p class="eyebrow">Anonymous building / advertised inventory</p><h1>Rental Market</h1>{stale_warning}<p class="note">Latest complete snapshot: {html.escape(latest_timestamp)} · Snapshot age: {age_display} · Complete-history day count: {freshness['complete_days']} · Collector health: {freshness['health']}. All prices are advertised rents, not executed lease prices.</p>
 <div class="summary"><div class="metric"><span class="eyebrow">Advertised units</span><strong>{latest_market['units']}</strong><small>7d {market_7_units if market_7_units is not None else '—'} / 30d {market_30_units if market_30_units is not None else '—'}</small></div><div class="metric"><span class="eyebrow">Available floor plans</span><strong>{len(plan_data)}</strong><small>current complete run</small></div><div class="metric"><span class="eyebrow">Best current fit</span><strong>{best_fit}</strong><small>best rated home, layout-level display</small></div><div class="metric"><span class="eyebrow">Median advertised rent</span><strong>{format_cents(latest_market['median']) if market_points else '—'}</strong><small>7d {format_cents(market_7_rent, True)} / 30d {format_cents(market_30_rent, True)}</small></div><div class="metric"><span class="eyebrow">Visible price reductions</span><strong>{latest_market['reductions']}</strong><small>vs. prior observed price</small></div></div>
-<section><h2>Personalized floor-plan recommendation</h2><p class="note">Recommendation uses the best currently advertised home in each layout: 35 points for relative asking rent and 65 for verified exposure, direct sunlight, pool-facing versus exterior facade, view, floor band, and disturbance/privacy. Floor 5 is the minimum; floor 7+ is preferred. Southeast and the interior pool-facing facade are preferred; northwest homes with mountain shade receive a strong penalty. Individual listings remain private.</p><div class="plan-grid">{''.join(recommendation_cards) or '<article class="plan-card">Run the collector to create a complete inventory snapshot.</article>'}</div></section>
+<section><h2>Personalized floor-plan recommendation</h2><p class="note">Recommendation uses the best currently advertised home in each layout: 35 points for relative asking rent and 65 for verified exposure, direct sunlight, pool-facing versus exterior facade, view, floor band, and disturbance/privacy. Irregular geometry alone does not disqualify a home. Layouts with substantial circulation or unusable space receive up to a 15-point efficiency penalty but can still be offset by price and residence traits. Floor 5 is the minimum; floor 7+ is preferred. Southeast and the interior pool-facing facade are preferred; northwest homes with mountain shade receive a strong penalty. Individual listings remain private.</p><div class="plan-grid">{''.join(recommendation_cards) or '<article class="plan-card">Run the collector to create a complete inventory snapshot.</article>'}</div></section>
 <section><h2>Layout detail</h2><div class="controls"><label>Layout<select id="plan-selector"></select></label></div><div class="panel"><div class="detail-grid"><div class="chart-column"><div class="chart-block"><div class="chart-heading"><span class="chart-title">Advertised rent</span><span class="legend"><span class="min"><i></i>Minimum</span><span class="med"><i></i>Median</span><span class="max"><i></i>Maximum</span></span></div><svg id="plan-chart" viewBox="0 0 700 235" role="img" aria-label="Minimum median and maximum advertised rent"></svg></div></div><aside id="plan-summary" aria-label="Selected layout summary"></aside></div></div></section>
-<section><h2>How to use this</h2><p class="note">Start with Personal fit, then compare the rent range and market signal. A layout can have both strong and weak exposures; homes below floor 5 are excluded when an eligible alternative exists, and floors 5–6 remain below the preferred floor-7 threshold. Individual listings are intentionally not published. Disappearance only means no longer advertised, not leased.</p></section>
+<section><h2>How to use this</h2><p class="note">Start with Personal fit, then compare the rent range and market signal. An unusual outline is not automatically bad; the layout penalty reflects how much circulation or hard-to-use area it appears to create. A layout can have both strong and weak exposures; homes below floor 5 are excluded when an eligible alternative exists, and floors 5–6 remain below the preferred floor-7 threshold. Individual listings are intentionally not published. Disappearance only means no longer advertised, not leased.</p></section>
 <section id="scoring-methodology"><h2>Scoring methodology</h2><p class="note">The 100-point personal-fit score is intentionally transparent. It reflects the stated preference for floor 5 minimum / floor 7+ preferred, southeast light, an interior pool-facing home, and the observed northwest mountain shade. Skyline labels require floor 7+ evidence; direction alone never creates a Manhattan-view claim. Every advertised room is joined to the verified PDF catalog before scoring.</p><div class="method-grid">
 <article class="method-card method-wide"><h3>Relative asking rent</h3><strong class="weight">35 points</strong><p>Compared only with other current homes in the same floor plan. Formula: round(clamp(28 − 1.4 × percent above the layout median, 14, 35)). At the median: 28; about 5% below: 35; 10% above: 14. This prevents a larger layout from winning simply because it is larger.</p></article>
 <article class="method-card"><h3>Exposure / direction</h3><strong class="weight">17 points</strong><p>SE {EXPOSURE_POINTS['SE']} · SW {EXPOSURE_POINTS['SW']} · NE {EXPOSURE_POINTS['NE']} · NW {EXPOSURE_POINTS['NW']} · unknown {EXPOSURE_POINTS['unknown']}.</p></article>
@@ -514,8 +535,9 @@ def generate_report(
 <article class="method-card"><h3>View</h3><strong class="weight">9 points</strong><p>Open skyline {VIEW_POINTS['skyline_open']} · pool + partial skyline {VIEW_POINTS['pool_skyline_partial']} · partial skyline {VIEW_POINTS['skyline_partial']} · pool/courtyard {VIEW_POINTS['pool_courtyard']} · open {VIEW_POINTS['open']} · none {VIEW_POINTS['none']} · unknown {VIEW_POINTS['unknown']}.</p></article>
 <article class="method-card"><h3>Floor requirement</h3><strong class="weight">9 points + gate</strong><p>Upper / floors 10–11: {FLOOR_BAND_POINTS['upper']} · preferred / floors 7–9: {FLOOR_BAND_POINTS['mid_high']} · acceptable / floors 5–6: {FLOOR_BAND_POINTS['mid']} · below minimum / floors 2–4: {FLOOR_BAND_POINTS['low']}. Below-floor-5 homes are excluded whenever a layout has an eligible alternative; floors 5–6 cannot receive Best match.</p></article>
 <article class="method-card"><h3>Disturbance / privacy</h3><strong class="weight">8 points</strong><p>Low disturbance {DISTURBANCE_POINTS['low']} · medium {DISTURBANCE_POINTS['medium']} · high / amenity-noise exposure {DISTURBANCE_POINTS['high']} · unknown {DISTURBANCE_POINTS['unknown']}. Pool activity remains a separate risk instead of canceling the pool-facing preference.</p></article>
-<article class="method-card"><h3>Floor-plan size</h3><strong class="weight">0 direct points</strong><p>Square footage and bedroom layout are shown for comparison but do not directly add points. Their cost is already handled through within-layout rent comparison.</p></article></div>
-<p class="note method-foot"><strong>Labels:</strong> Best match 82–100 · Strong 70–81 · Consider 58–69 · Low fit below 58. Floor rules override these labels: floors 2–4 are below minimum, and floors 5–6 are capped at Strong. A home with no verified traits is not rated.</p></section>
+<article class="method-card"><h3>Floor-plan size</h3><strong class="weight">0 direct points</strong><p>Square footage and bedroom layout are shown for comparison but do not directly add points. Their cost is already handled through within-layout rent comparison.</p></article>
+<article class="method-card"><h3>Layout efficiency</h3><strong class="weight">0 to −15 points</strong><p>Shape alone has no penalty. Usable but mildly awkward plans deduct 4 points; layouts with substantial circulation, narrow transition zones, or hard-to-use area deduct 15. This is a preference penalty, not an exclusion.</p></article></div>
+<p class="note method-foot"><strong>Labels:</strong> Best match 82–100 · Strong 70–81 · Consider 58–69 · Low fit below 58. Floor rules override these labels: floors 2–4 are below minimum, and floors 5–6 are capped at Strong. Layout-efficiency deductions can be offset by rent or stronger residence traits. A home with no verified traits is not rated.</p></section>
 </main><script id="plan-data" type="application/json">{json_for_script(plan_data)}</script><script>
 (()=>{{const plans=JSON.parse(document.querySelector('#plan-data').textContent),money=v=>new Intl.NumberFormat('en-US',{{style:'currency',currency:'USD',maximumFractionDigits:0}}).format(v/100),date=v=>new Date(v).toLocaleDateString(undefined,{{month:'short',day:'numeric'}}),make=(n,a)=>{{const e=document.createElementNS('http://www.w3.org/2000/svg',n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));return e}},label=(svg,attrs,value)=>{{const node=make('text',attrs);node.textContent=value;svg.append(node)}},path=(svg,points,field,klass,h=235,range=null)=>{{if(!points.length)return;const w=700,l=52,r=12,t=12,b=30,vs=points.map(p=>p[field]),lo=range?range.lo:Math.min(...vs),hi=range?range.hi:Math.max(...vs),x=i=>l+i*(w-l-r)/Math.max(points.length-1,1),y=v=>hi===lo?(t+h-b)/2:h-b-(v-lo)*(h-t-b)/(hi-lo);svg.append(make('polyline',{{points:points.map((p,i)=>`${{x(i).toFixed(1)}},${{y(p[field]).toFixed(1)}}`).join(' '),'class':klass}}));points.forEach((p,i)=>svg.append(make('circle',{{cx:x(i),cy:y(p[field]),r:4,'class':'dot'}})));return {{lo,hi}}}},tooltips=(svg,points,fields,h)=>{{const w=700,l=52,r=12,plot=w-l-r,cell=plot/Math.max(points.length-1,1),boxW=176,boxH=fields.length===1?48:86;points.forEach((p,i)=>{{const x=l+i*cell,target=make('rect',{{x:Math.max(l,x-cell/2),y:0,width:Math.max(cell,16),height:h,'class':'hover-target',tabindex:0,'aria-label':`${{date(p.timestamp)}}. ${{fields.map(([field,name])=>`${{name}}: ${{field==='units'?p[field]:money(p[field])}}`).join('. ')}}`}}),show=()=>{{svg.querySelector('.chart-tooltip')?.remove();const tx=Math.min(Math.max(x-boxW/2,4),w-boxW-4),ty=8,g=make('g',{{'class':'chart-tooltip'}});g.append(make('rect',{{x:tx,y:ty,width:boxW,height:boxH,rx:4}}));label(g,{{x:tx+12,y:ty+18}},date(p.timestamp));fields.forEach(([field,name],j)=>label(g,{{x:tx+12,y:ty+37+j*15}},`${{name}}: ${{field==='units'?p[field]:money(p[field])}}`));svg.append(g)}},hide=()=>svg.querySelector('.chart-tooltip')?.remove();target.addEventListener('pointerenter',show);target.addEventListener('pointerleave',hide);target.addEventListener('focus',show);target.addEventListener('blur',hide);svg.append(target)}})}};
 const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};[48,205].forEach(y=>pc.append(make('line',{{x1:52,y1:y,x2:688,y2:y,'class':'chart-grid'}})));path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));tooltips(pc,p.points,[['min','Minimum'],['median','Median'],['max','Maximum']],235);const r=p.recommendation,reason=r.reasons.slice(0,3).join('; ');pSum.innerHTML=`<dl><dt>Personal fit</dt><dd>${{r.score===null?'—':r.score+'/100 · '+r.label}}</dd><dt>Why</dt><dd>${{reason}}</dd><dt>Rated current homes</dt><dd>${{r.rated_count}}/${{r.unit_count}}</dd><dt>Floor 5+ eligible</dt><dd>${{r.eligible_floor_count}}</dd><dt>Floor 7+ preferred</dt><dd>${{r.preferred_floor_count}}</dd><dt>Preferred southeast</dt><dd>${{r.preferred_count}}</dd><dt>Pool-facing interior</dt><dd>${{r.pool_facing_count}}</dd><dt>Low-sun northwest</dt><dd>${{r.low_sun_count}}</dd><dt>Market signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
