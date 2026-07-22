@@ -12,6 +12,7 @@ from typing import Iterable
 
 
 PRIVATE_CATALOG_FILE = Path("private/unit_catalog.csv")
+PRIVATE_FLOORPLAN_FILE = Path("private/floorplan_catalog.csv")
 PUBLIC_CATALOG_FILE = Path("data/unit_traits.csv")
 UNIT_HISTORY_FILE = Path("data/unit_snapshots.csv")
 EXPECTED_FLOOR_COUNTS = {2: 1, 3: 20, 4: 40, 5: 43, 6: 47, 7: 47,
@@ -20,7 +21,12 @@ PUBLIC_FIELDS = [
     "unit_id", "floorplan", "exposure", "secondary_exposure", "facade",
     "pool_facing", "outlook", "sunlight", "view", "floor_band",
     "disturbance", "confidence",
+    "layout_geometry", "layout_efficiency", "layout_fit", "layout_review_confidence",
 ]
+
+LAYOUT_GEOMETRIES = {"rectangular", "mostly_rectangular", "irregular"}
+LAYOUT_EFFICIENCIES = {"efficient", "moderate", "inefficient"}
+LAYOUT_FITS = {"preferred", "acceptable", "penalized"}
 
 
 def read_csv(filename: Path) -> list[dict[str, str]]:
@@ -87,17 +93,65 @@ def validate_private_catalog(
         raise ValueError(f"Unexpected residence counts by floor: {counts}")
 
 
+def validate_floorplan_catalog(rows: list[dict[str, str]]) -> None:
+    required = {
+        "floorplan", "bedrooms", "geometry", "layout_efficiency", "layout_fit",
+        "review_confidence",
+    }
+    if not rows or not required.issubset(rows[0]):
+        raise ValueError(
+            f"Floor-plan catalog is missing fields: {sorted(required - set(rows[0] if rows else []))}"
+        )
+    plans = [row["floorplan"] for row in rows]
+    if len(plans) != len(set(plans)):
+        raise ValueError("Floor-plan catalog contains duplicate plan codes")
+    for row in rows:
+        plan = row["floorplan"]
+        if not plan or plan[0] not in {"A", "B"}:
+            raise ValueError(f"Unsupported reviewed floor plan {plan!r}")
+        expected_bedrooms = "1" if plan.startswith("A") else "2"
+        if row["bedrooms"] != expected_bedrooms:
+            raise ValueError(f"Floor plan {plan} has inconsistent bedroom count")
+        if row["geometry"] not in LAYOUT_GEOMETRIES:
+            raise ValueError(f"Floor plan {plan} has invalid geometry {row['geometry']!r}")
+        if row["layout_efficiency"] not in LAYOUT_EFFICIENCIES:
+            raise ValueError(
+                f"Floor plan {plan} has invalid layout efficiency {row['layout_efficiency']!r}"
+            )
+        if row["layout_fit"] not in LAYOUT_FITS:
+            raise ValueError(f"Floor plan {plan} has invalid layout fit {row['layout_fit']!r}")
+        if not row["review_confidence"]:
+            raise ValueError(f"Floor plan {plan} has no review confidence")
+
+
 def compile_public_catalog(
     rows: list[dict[str, str]], secret: str,
     expected_floor_counts: dict[int, int] | None = None,
+    floorplans: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     validate_private_catalog(rows, expected_floor_counts)
+    floorplan_map: dict[str, dict[str, str]] = {}
+    if floorplans is not None:
+        validate_floorplan_catalog(floorplans)
+        floorplan_map = {row["floorplan"]: row for row in floorplans}
+        missing = sorted({row["floorplan"] for row in rows if row["floorplan"][:1] in {"A", "B"}}
+                         - set(floorplan_map))
+        if missing:
+            raise ValueError(f"One-/two-bedroom floor plans lack reviews: {missing}")
     compiled = []
     for row in rows:
         source_id = source_unit_id(row["room_number"])
-        compiled.append({"unit_id": secure_unit_id(source_id, secret), **{
-            field: row[field] for field in PUBLIC_FIELDS if field != "unit_id"
-        }})
+        review = floorplan_map.get(row["floorplan"], {})
+        values = {field: row[field] for field in PUBLIC_FIELDS
+                  if field not in {"unit_id", "layout_geometry", "layout_efficiency", "layout_fit",
+                                   "layout_review_confidence"}}
+        values.update({
+            "layout_geometry": review.get("geometry", "unknown"),
+            "layout_efficiency": review.get("layout_efficiency", "unknown"),
+            "layout_fit": review.get("layout_fit", "unknown"),
+            "layout_review_confidence": review.get("review_confidence", "unknown"),
+        })
+        compiled.append({"unit_id": secure_unit_id(source_id, secret), **values})
     if len({row["unit_id"] for row in compiled}) != len(compiled):
         raise ValueError("Keyed unit identifiers collided")
     # Never preserve source room order in the public artifact: even without an
@@ -127,11 +181,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--private", type=Path, default=PRIVATE_CATALOG_FILE)
     parser.add_argument("--output", type=Path, default=PUBLIC_CATALOG_FILE)
+    parser.add_argument("--floorplans", type=Path, default=PRIVATE_FLOORPLAN_FILE)
     parser.add_argument("--migrate-history", action="store_true")
     args = parser.parse_args()
     secret = os.environ.get("UNIT_ID_HASH_KEY", "")
     catalog = read_csv(args.private)
-    compiled = compile_public_catalog(catalog, secret)
+    floorplans = read_csv(args.floorplans) if args.floorplans.exists() else None
+    compiled = compile_public_catalog(catalog, secret, floorplans=floorplans)
     write_csv(args.output, compiled, PUBLIC_FIELDS)
     print(f"[INFO] Compiled {len(compiled)} anonymous residences to {args.output}.")
     if args.migrate_history:

@@ -8,6 +8,7 @@ from catalog import (
     migrate_history_ids,
     secure_unit_id,
     source_unit_id,
+    validate_floorplan_catalog,
 )
 
 
@@ -34,6 +35,39 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("floor", compiled[0])
         self.assertTrue(compiled[0]["unit_id"].startswith("listing-"))
         self.assertEqual([row["unit_id"] for row in compiled], sorted(row["unit_id"] for row in compiled))
+
+    def test_floorplan_review_is_inherited_without_publishing_source_metadata(self):
+        floorplans = [{
+            "floorplan": "A4", "bedrooms": "1", "geometry": "rectangular",
+            "layout_efficiency": "efficient",
+            "layout_fit": "preferred", "review_confidence": "manual_image_review",
+            "image_url": "https://property.example/identifying-image.png",
+            "review_notes": "private identifying notes",
+        }]
+        compiled = compile_public_catalog(
+            [self.sample_room("9001")], TEST_KEY, {90: 1}, floorplans=floorplans
+        )
+        self.assertEqual(compiled[0]["layout_geometry"], "rectangular")
+        self.assertEqual(compiled[0]["layout_efficiency"], "efficient")
+        self.assertEqual(compiled[0]["layout_fit"], "preferred")
+        self.assertNotIn("image_url", compiled[0])
+        self.assertNotIn("review_notes", compiled[0])
+
+    def test_missing_or_invalid_floorplan_review_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "invalid layout fit"):
+            validate_floorplan_catalog([{
+                "floorplan": "A4", "bedrooms": "1", "geometry": "rectangular",
+                "layout_efficiency": "efficient",
+                "layout_fit": "maybe", "review_confidence": "manual",
+            }])
+        with self.assertRaisesRegex(ValueError, "lack reviews"):
+            compile_public_catalog(
+                [self.sample_room("9001")], TEST_KEY, {90: 1}, floorplans=[{
+                    "floorplan": "B1", "bedrooms": "2", "geometry": "rectangular",
+                    "layout_efficiency": "efficient",
+                    "layout_fit": "preferred", "review_confidence": "manual",
+                }]
+            )
 
     def test_history_migration_rekeys_known_legacy_unit(self):
         catalog = [self.sample_room("9001")]

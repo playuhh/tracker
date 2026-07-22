@@ -130,6 +130,8 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertIn("Floor requirement", report)
         self.assertIn("Floor 5 is the minimum", report)
         self.assertIn("Floor-plan size", report)
+        self.assertIn("Layout efficiency", report)
+        self.assertIn("0 to −15 points", report)
         self.assertIn("0 direct points", report)
         self.assertIn("Best match 82–100", report)
         self.assertIn("rentValues=p.points.flatMap", report)
@@ -176,6 +178,25 @@ class UnitHistoryTest(unittest.TestCase):
         self.assertEqual(result["floor_status"], "acceptable")
         self.assertLessEqual(result["score"], 81)
         self.assertEqual(result["eligible_floor_count"], 1)
+
+    def test_inefficient_layout_is_penalized_but_not_excluded(self):
+        peers = [
+            unit(self.timestamps[3], "rejected", "$3,000"),
+            unit(self.timestamps[3], "eligible", "$3,900"),
+        ]
+        traits = {
+            "rejected": {"exposure": "SE", "sunlight": "good", "facade": "internal",
+                         "view": "skyline_open", "floor_band": "upper", "disturbance": "low",
+                         "layout_fit": "penalized"},
+            "eligible": {"exposure": "NW", "sunlight": "low", "facade": "external",
+                         "view": "none", "floor_band": "mid_high", "disturbance": "low",
+                         "layout_fit": "acceptable"},
+        }
+        result = plan_recommendation(peers, traits)
+        self.assertEqual(result["layout_status"], "penalized")
+        self.assertEqual(result["layout_penalty"], 15)
+        self.assertEqual(result["score"], result["raw_score"] - 15)
+        self.assertEqual(result["non_penalized_layout_count"], 1)
 
     @staticmethod
     def write_csv(path, rows):
