@@ -63,7 +63,44 @@ Useful flags:
 
 # Regenerate the dashboard from saved history without collecting new data.
 .venv/bin/python scraper.py --report-only
+
+# Validate an ignored private registry without writing history or reports.
+.venv/bin/python scraper.py --probe-properties --no-write
 ```
+
+## Private portfolio mode
+
+Portfolio collection is configured with an ignored JSON registry rather than
+tracked property identities or source IDs. Copy
+`config/property-registry.example.json` to `private/property-registry.json`,
+replace its placeholders locally, and set:
+
+```bash
+export RENTAL_PROPERTY_REGISTRY="$PWD/private/property-registry.json"
+python3 scraper.py --probe-properties --no-write
+```
+
+Each property has a stable internal key and anonymous public label, its public
+page and private source configuration, location/provider metadata, adapter
+version, enablement and compliance state, verification date, capability flags,
+and mode. New properties must start as `market_only`. They can receive market
+recommendations (budget, value, timing), but the UI must say **Personal fit
+unavailable — no verified property traits** instead of guessing or awarding
+neutral points. `trait_enriched` requires a property-bound private catalog,
+keyed identifiers, provenance/confidence, schema and coverage validation.
+
+The legacy `RENTAL_BUILDING_PAGE_ID` entry point remains available for Building
+A. Portfolio snapshots are atomic: no property history is written unless every
+enabled property validates, so a failed source is never interpreted as zero
+inventory. Cross-property reports belong under ignored `private/`; public
+portfolio publishing remains off unless the explicit permission gate is set.
+
+All requests for the provider domain share one sequential governor with a fixed
+interval, total request/retry/property/elapsed-time budgets, and non-sensitive
+metrics. HTTP 401/403/429 or challenge content opens the domain circuit breaker,
+stops remaining requests, and prevents history writes. No alternate endpoint is
+attempted. See [the compatibility notes](docs/portfolio-compatibility.md) before
+adding another property.
 
 ## Google Sheets (optional)
 
@@ -88,6 +125,13 @@ GitHub Actions runs the standard-library collector every day at `13:00 UTC`
 (9 AM during Toronto daylight time, 8 AM during standard time). It commits the
 anonymized histories, derived aggregates, and regenerated report back to the repository, then deploys
 the report to GitHub Pages.
+
+The workflow first runs all tests, audits the current public boundary, collects,
+audits generated output again, and only then may commit. Pages is built by an
+explicit allowlist containing only `data/report.html`; private reports and
+registry files cannot enter the artifact. The report shows its latest complete
+snapshot, age, complete-history day count, collector health, and a warning after
+the 36-hour stale threshold.
 
 The recommendation score is regenerated automatically on every run. It assigns
 35 points to a currently advertised home's rent relative to its layout peers
@@ -120,6 +164,10 @@ https://<account>.github.io/<repository>/
 You can run it immediately from GitHub: **Actions -> Apartment Price Tracker
 -> Run workflow**. To change it from daily to weekly, edit the `cron` line in
 `.github/workflows/scraper.yml`.
+
+For GitHub CLI authentication failures inside Codex, workflow dispatch, and run
+log inspection, follow the
+[GitHub Actions troubleshooting runbook](docs/github-actions-troubleshooting.md).
 
 ## Troubleshooting a site change
 

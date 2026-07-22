@@ -18,6 +18,9 @@ identify a particular building or unit.
   keyed unit identifier and anonymous floor band; never publish the source map.
 - Individual listing snapshots exist solely to derive aggregates. The public
   report must remain layout-first and must not expose a browsable unit list.
+- Real property identity, URL, address, source/page configuration, and portfolio
+  comparisons stay in ignored `private/`. Tracked registry examples contain
+  placeholders only. Public portfolio publishing is off by default.
 
 ## What is measured
 
@@ -68,8 +71,7 @@ that layout's recorded square footage.
 - Layout labels and listing identifiers are intentionally generic.
 - In a layout price chart, min, median, and max share one y-axis. This makes
   their vertical relationship comparable at each date.
-- Hover each chart marker to see its date, series name, and exact value. The
-  inventory chart uses the same behaviour for listing counts.
+- Hover each rent-chart marker to see its date, series name, and exact value.
 - The report calls only complete snapshot days usable history; it does not fill
   gaps with assumed values.
 - The layout recommendation uses the best verified current option and publishes
@@ -77,6 +79,23 @@ that layout's recorded square footage.
   score. Unknown traits remain explicitly unrated.
 
 ## Operating runbook
+
+### Collection modes
+
+- `market_only` is the default for every newly researched property. It supports
+  advertised rent, square footage, rent per square foot, inventory, move-in,
+  price movement, history and timing recommendations. Trait-dependent rules are
+  `Unknown / not evaluated`; missing traits neither help nor penalize it.
+- `trait_enriched` is limited to Building A until another property has its own
+  validated private catalog, keyed mapping, provenance, confidence and complete
+  coverage. Another building's geometry or room-number pattern is never reused.
+
+The ignored property registry is loaded through `RENTAL_PROPERTY_REGISTRY`.
+`--probe-properties --no-write` validates it and emits one safe status per
+property without writing CSV, reports, notifications, commits or deployments.
+Compatibility means an observed response contract passed overview, detail,
+required-field and count checks; a similar-looking Availability widget alone
+does not establish compatibility.
 
 ### Local
 
@@ -117,3 +136,6 @@ writing observations.
    or private planning notes.
 5. For public-facing changes, trigger the workflow and verify its GitHub Pages
    result.
+6. Run `python3 privacy_audit.py`; it checks the exact public output/fixture
+   scope, keyed unit identifiers and tracked-private boundary. Never broaden the
+   Pages copy step beyond the allowlist in `privacy_audit.py`.

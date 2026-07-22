@@ -29,6 +29,7 @@ VIEW_POINTS = {
 }
 FLOOR_BAND_POINTS = {"low": 0, "mid": 3, "mid_high": 7, "upper": 9, "unknown": 4}
 DISTURBANCE_POINTS = {"low": 8, "medium": 6, "high": 2, "unknown": 5}
+STALE_THRESHOLD_HOURS = 36
 
 
 def read_rows(filename: Path) -> list[dict[str, str]]:
@@ -92,6 +93,12 @@ def unit_recommendation(
     view = trait.get("view", "unknown")
     floor_band = trait.get("floor_band", "unknown")
     disturbance = trait.get("disturbance", "unknown")
+    raw_confidence = trait.get("confidence", "unknown").casefold()
+    confidence = (
+        "verified" if "resident" in raw_confidence or raw_confidence == "verified"
+        else "modeled" if raw_confidence not in {"", "unknown", "incomplete"}
+        else "incomplete" if raw_confidence == "incomplete" else "unknown"
+    )
     fit_points = (
         EXPOSURE_POINTS.get(exposure, EXPOSURE_POINTS["unknown"])
         + SUNLIGHT_POINTS.get(sunlight, SUNLIGHT_POINTS["unknown"])
@@ -151,6 +158,7 @@ def unit_recommendation(
         "sunlight": sunlight,
         "floor_status": floor_status,
         "reasons": reasons,
+        "confidence": confidence,
     }
 
 
@@ -164,7 +172,8 @@ def plan_recommendation(
                 "rated_count": 0, "unit_count": len(units), "preferred_count": 0,
                 "pool_facing_count": 0, "eligible_floor_count": 0,
                 "preferred_floor_count": 0, "low_sun_count": 0,
-                "reasons": ["no verified orientation data yet"]}
+                "confidence": "unknown", "trait_status": "not_evaluated",
+                "reasons": ["Personal fit unavailable — no verified property traits"]}
     eligible = [result for result in scored if result["floor_status"] != "below_minimum"]
     best = max(eligible or scored, key=lambda result: int(result["score"]))
     scores = [int(result["score"]) for result in scored]
@@ -178,7 +187,36 @@ def plan_recommendation(
         "eligible_floor_count": sum(result["floor_status"] != "below_minimum" for result in scored),
         "preferred_floor_count": sum(result["floor_status"] == "preferred" for result in scored),
         "low_sun_count": sum(result["sunlight"] == "low" for result in scored),
+        "trait_status": "evaluated",
     }
+
+
+def market_recommendations(candidates: Iterable[dict[str, str]]) -> dict[str, dict[str, object]]:
+    """Select market-only winners without consulting or imputing property traits."""
+    rows = list(candidates)
+    if not rows:
+        return {}
+    def identity(row: dict[str, str]) -> str:
+        return row.get("floorplan_id") or row.get("floorplan") or "unknown"
+    budget = min(rows, key=lambda row: price_to_cents(row["price"]))
+    with_sqft = [row for row in rows if int_value(row.get("sqft", "")) > 0]
+    value = min(
+        with_sqft,
+        key=lambda row: price_to_cents(row["price"]) / int_value(row["sqft"]),
+    ) if with_sqft else budget
+    timing = min(rows, key=lambda row: move_in_sort_key(row.get("move_in", "")))
+    return {
+        "best_budget": {"candidate": identity(budget), "confidence": "verified"},
+        "best_value": {"candidate": identity(value),
+                       "confidence": "verified" if with_sqft else "incomplete"},
+        "best_timing": {"candidate": identity(timing), "confidence": "verified"},
+    }
+
+
+def trait_constraint_status(has_verified_traits: bool) -> dict[str, str]:
+    return ({"status": "evaluated", "confidence": "verified"}
+            if has_verified_traits else
+            {"status": "Unknown / not evaluated", "confidence": "unknown"})
 
 
 def move_in_sort_key(value: str) -> tuple[int, str]:
@@ -287,6 +325,25 @@ def parsed_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def freshness_status(
+    complete_times: dict[str, list[str]], now: datetime | None = None,
+    stale_threshold_hours: int = STALE_THRESHOLD_HOURS,
+) -> dict[str, object]:
+    """Summarize freshness using complete runs only."""
+    timestamps = [timestamp for values in complete_times.values() for timestamp in values]
+    if not timestamps:
+        return {"latest": None, "age_hours": None, "stale": True,
+                "complete_days": 0, "health": "No successful snapshot"}
+    latest = max(parsed_timestamp(timestamp) for timestamp in timestamps)
+    observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_hours = max(0.0, (observed_now - latest).total_seconds() / 3600)
+    stale = age_hours > stale_threshold_hours
+    return {"latest": latest.isoformat(timespec="seconds"), "age_hours": age_hours,
+            "stale": stale,
+            "complete_days": len({parsed_timestamp(value).date() for value in timestamps}),
+            "health": "Stale" if stale else "Healthy"}
+
+
 def window_change(rows: list[dict[str, object]], field: str, days: int) -> int | None:
     """Change only when coverage reaches the named daily-history window."""
     if len(rows) < days:
@@ -336,7 +393,7 @@ def fallback_daily_rows(unit_rows: list[dict[str, str]]) -> list[dict[str, str]]
 def generate_report(
     floorplan_file: Path, unit_file: Path, output_file: Path,
     daily_file: Path | None = None, runs_file: Path | None = None,
-    traits_file: Path | None = None,
+    traits_file: Path | None = None, now: datetime | None = None,
 ) -> None:
     """Build the floor-plan-first dashboard; raw snapshots remain authoritative."""
     floorplan_history, unit_history = read_rows(floorplan_file), read_rows(unit_file)
@@ -347,6 +404,7 @@ def generate_report(
         daily_history = fallback_daily_rows(unit_history)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     complete_times = successful_times(runs, [*floorplan_history, *unit_history])
+    freshness = freshness_status(complete_times, now)
     current_times = {apartment: times[-1] for apartment, times in complete_times.items() if times}
     current_daily = [row for row in daily_history if row["timestamp"] == current_times.get(row["apartment"])]
     current_units = [row for row in unit_history if row["timestamp"] == current_times.get(row["apartment"])]
@@ -397,6 +455,7 @@ def generate_report(
         reasons = "; ".join(str(reason) for reason in recommendation["reasons"][:3])
         fit = (f'<div class="fit-stack"><strong class="score">{score_display}</strong>'
                f'<span class="signal {recommendation["class"]}">{recommendation["label"]}</span>'
+               f'<small>Confidence: {recommendation["confidence"]}</small>'
                f'<small>{recommendation["rated_count"]}/{recommendation["unit_count"]} current homes rated</small></div>')
         recommendation_cards.append(
             f'<article class="plan-card"><header><div><button class="plan-link" '
@@ -426,17 +485,26 @@ def generate_report(
     market_7_units, market_30_units = window_change(market_points, "units", 7), window_change(market_points, "units", 30)
     market_7_rent, market_30_rent = window_change(market_points, "median", 7), window_change(market_points, "median", 30)
 
-    latest_timestamp = max((row["timestamp"] for row in current_daily), default="No complete snapshots yet")
+    latest_timestamp = str(freshness["latest"] or "No complete snapshots yet")
     rated_plans = [plan for plan in plan_data if plan["recommendation"]["score"] is not None]
     best_plan = max(rated_plans, key=lambda plan: int(plan["recommendation"]["score"])) if rated_plans else None
     best_fit = (f'{best_plan["layout"]} · {best_plan["recommendation"]["score"]}/100'
-                if best_plan else "Collecting traits")
+                if best_plan else "Personal fit unavailable")
+    if freshness["stale"] and best_plan:
+        best_fit += " · stale data"
+    age_display = "—" if freshness["age_hours"] is None else f'{float(freshness["age_hours"]):.1f} hours'
+    stale_warning = (
+        '<aside class="stale-warning"><strong>Stale-data warning:</strong> The report remains readable, '
+        'but current availability and recommendations may be out of date.</aside>'
+        if freshness["stale"] else ""
+    )
     document = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rental Market Tracker</title>
-<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1380px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}h3{{margin:0;font-size:1rem;font-weight:400}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font: .72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel,.method-card,.plan-card{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:hidden}}button{{font:inherit;color:inherit}}.plan-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}}.plan-card{{padding:18px;min-width:0}}.plan-card header{{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}}.plan-card header>div:first-child{{display:grid;gap:8px}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline;font-size:1rem;text-align:left}}.fit-stack{{display:grid;justify-items:end;gap:6px;min-width:132px}}.score{{display:block;font-size:1.2rem}}.fit-stack small{{line-height:1.35;text-align:right}}.why{{min-height:2.6em;margin:16px 0;color:var(--ink);font:.82rem/1.45 ui-monospace,monospace}}.card-stats{{border-top:1px solid var(--line);padding-top:13px}}.signal{{display:inline-block;font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.market-signal{{max-width:190px;white-space:normal;line-height:1.25}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:9px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:1fr 320px;gap:10px;padding:16px}}svg{{display:block;width:100%;height:235px}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}dl{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right;max-width:230px;overflow-wrap:anywhere}}.method-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}}.method-card{{padding:16px}}.method-card .weight{{display:block;margin:8px 0;font:1.35rem ui-monospace,monospace}}.method-card p{{margin:0;color:var(--muted);font:.78rem/1.5 ui-monospace,monospace}}.method-wide{{grid-column:span 2}}.method-foot{{margin-top:12px;padding:16px;border-left:3px solid var(--accent);background:#ffffff8f}}@media(max-width:900px){{main{{padding:32px 12px}}.summary,.detail-grid,.method-grid,.plan-grid{{grid-template-columns:1fr}}.method-wide{{grid-column:auto}}select{{width:100%}}}}@media(max-width:520px){{.plan-card header{{display:grid}}.fit-stack{{justify-items:start;min-width:0}}.fit-stack small{{text-align:left}}dl{{grid-template-columns:1fr}}dd{{text-align:left;max-width:none;margin-bottom:6px}}}}</style></head><body><main>
-<p class="eyebrow">Anonymous building / advertised inventory</p><h1>Rental Market</h1><p class="note">Latest complete snapshot: {html.escape(latest_timestamp)}. All prices are advertised rents, not executed lease prices.</p>
+<style>:root{{--ink:#282629;--muted:#706d6d;--paper:#faf8f5;--line:#ded8cf;--accent:#9a4e10;--good:#28724d;--bad:#a2382d}}*{{box-sizing:border-box}}body{{margin:0;color:var(--ink);background:linear-gradient(125deg,#f1ede6,#fff 40%,#eee6db);font-family:Georgia,serif}}main{{max-width:1380px;margin:auto;padding:52px 22px 80px}}h1{{margin:0;font-size:clamp(2.6rem,7vw,5rem);font-weight:400;letter-spacing:-.05em}}h2{{font-weight:400;margin:0 0 10px;font-size:1.7rem}}h3{{margin:0;font-size:1rem;font-weight:400}}section{{margin-top:45px}}.eyebrow,small,.note{{color:var(--muted);font:.72rem ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}}.note{{text-transform:none;letter-spacing:0;font-size:.82rem}}.summary{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:28px 0}}.metric,.panel,.method-card,.plan-card{{background:#ffffffc9;border:1px solid var(--line)}}.metric{{padding:16px}}.metric strong{{display:block;font-size:1.45rem;font-weight:400;margin-top:6px}}.panel{{overflow:hidden}}button{{font:inherit;color:inherit}}.plan-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}}.plan-card{{padding:18px;min-width:0}}.plan-card header{{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}}.plan-card header>div:first-child{{display:grid;gap:8px}}.plan-link{{padding:0;border:0;background:none;color:var(--accent);cursor:pointer;font-weight:bold;text-decoration:underline;font-size:1rem;text-align:left}}.fit-stack{{display:grid;justify-items:end;gap:6px;min-width:132px}}.score{{display:block;font-size:1.2rem}}.fit-stack small{{line-height:1.35;text-align:right}}.why{{min-height:2.6em;margin:16px 0;color:var(--ink);font:.82rem/1.45 ui-monospace,monospace}}.card-stats{{border-top:1px solid var(--line);padding-top:13px}}.signal{{display:inline-block;font-size:.72rem;padding:4px 6px;border:1px solid currentColor;white-space:nowrap}}.market-signal{{max-width:190px;white-space:normal;line-height:1.25}}.good{{color:var(--good)}}.bad{{color:var(--bad)}}.neutral{{color:var(--muted)}}.controls{{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 12px}}label{{display:grid;gap:4px;color:var(--muted);font:.72rem ui-monospace,monospace;text-transform:uppercase}}select{{padding:10px 38px 10px 12px;background:#fff;border:1px solid var(--line);min-width:230px}}.detail-grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,360px);gap:28px;padding:24px}}.chart-column{{min-width:0}}.chart-block+ .chart-block{{border-top:1px solid var(--line);margin-top:18px;padding-top:18px}}.chart-heading{{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 6px}}.chart-title{{font:600 .76rem ui-monospace,monospace;letter-spacing:.05em;text-transform:uppercase}}.legend{{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font:.68rem ui-monospace,monospace}}.legend span{{display:flex;align-items:center;gap:5px}}.legend i{{width:15px;height:2px;background:currentColor}}.legend .min{{color:#c77934}}.legend .med{{color:var(--accent)}}.legend .max{{color:#563e2c}}#plan-chart,#inventory-chart{{display:block;width:100%;height:auto;overflow:hidden}}.chart-label{{fill:var(--muted);font:11px ui-monospace,monospace}}.chart-grid{{stroke:var(--line);stroke-width:1}}.line-min{{fill:none;stroke:#c77934;stroke-width:2}}.line-med{{fill:none;stroke:var(--accent);stroke-width:3}}.line-max{{fill:none;stroke:#563e2c;stroke-width:2}}.dot{{fill:var(--accent)}}.hover-target{{fill:transparent;pointer-events:all}}.chart-tooltip{{pointer-events:none}}.chart-tooltip rect{{fill:var(--ink);opacity:.94}}.chart-tooltip text{{fill:#fff;font:11px ui-monospace,monospace}}#plan-summary{{align-self:start;background:var(--paper);border:1px solid var(--line);border-top:3px solid var(--accent);padding:18px}}#plan-summary dl{{grid-template-columns:minmax(116px,1fr) minmax(118px,1.25fr);gap:0 14px}}#plan-summary dt,#plan-summary dd{{padding:9px 0;border-bottom:1px solid var(--line);line-height:1.35}}#plan-summary dt:last-of-type,#plan-summary dd:last-of-type{{border-bottom:0}}dl{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;margin:0;font:.82rem ui-monospace,monospace}}dt{{color:var(--muted)}}dd{{margin:0;text-align:right;max-width:230px;overflow-wrap:anywhere}}.method-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}}.method-card{{padding:16px}}.method-card .weight{{display:block;margin:8px 0;font:1.35rem ui-monospace,monospace}}.method-card p{{margin:0;color:var(--muted);font:.78rem/1.5 ui-monospace,monospace}}.method-wide{{grid-column:span 2}}.method-foot{{margin-top:12px;padding:16px;border-left:3px solid var(--accent);background:#ffffff8f}}@media(max-width:900px){{main{{padding:32px 12px}}.summary,.detail-grid,.method-grid,.plan-grid{{grid-template-columns:1fr}}.detail-grid{{gap:20px;padding:18px}}.method-wide{{grid-column:auto}}select{{width:100%}}}}@media(max-width:520px){{.plan-card header{{display:grid}}.fit-stack{{justify-items:start;min-width:0}}.fit-stack small{{text-align:left}}.detail-grid{{padding:12px}}.chart-heading{{align-items:flex-start;flex-direction:column;gap:7px}}#plan-summary dl,dl{{grid-template-columns:1fr}}#plan-summary dd,dd{{text-align:left;max-width:none;margin-bottom:6px}}#plan-summary dt{{border-bottom:0;padding-bottom:0}}}}</style></head><body><main>
+<style>.line-min{{stroke-dasharray:2 5}}.line-max{{stroke-dasharray:8 5}}</style>
+<p class="eyebrow">Anonymous building / advertised inventory</p><h1>Rental Market</h1>{stale_warning}<p class="note">Latest complete snapshot: {html.escape(latest_timestamp)} · Snapshot age: {age_display} · Complete-history day count: {freshness['complete_days']} · Collector health: {freshness['health']}. All prices are advertised rents, not executed lease prices.</p>
 <div class="summary"><div class="metric"><span class="eyebrow">Advertised units</span><strong>{latest_market['units']}</strong><small>7d {market_7_units if market_7_units is not None else '—'} / 30d {market_30_units if market_30_units is not None else '—'}</small></div><div class="metric"><span class="eyebrow">Available floor plans</span><strong>{len(plan_data)}</strong><small>current complete run</small></div><div class="metric"><span class="eyebrow">Best current fit</span><strong>{best_fit}</strong><small>best rated home, layout-level display</small></div><div class="metric"><span class="eyebrow">Median advertised rent</span><strong>{format_cents(latest_market['median']) if market_points else '—'}</strong><small>7d {format_cents(market_7_rent, True)} / 30d {format_cents(market_30_rent, True)}</small></div><div class="metric"><span class="eyebrow">Visible price reductions</span><strong>{latest_market['reductions']}</strong><small>vs. prior observed price</small></div></div>
 <section><h2>Personalized floor-plan recommendation</h2><p class="note">Recommendation uses the best currently advertised home in each layout: 35 points for relative asking rent and 65 for verified exposure, direct sunlight, pool-facing versus exterior facade, view, floor band, and disturbance/privacy. Floor 5 is the minimum; floor 7+ is preferred. Southeast and the interior pool-facing facade are preferred; northwest homes with mountain shade receive a strong penalty. Individual listings remain private.</p><div class="plan-grid">{''.join(recommendation_cards) or '<article class="plan-card">Run the collector to create a complete inventory snapshot.</article>'}</div></section>
-<section><h2>Layout detail</h2><div class="controls"><label>Layout<select id="plan-selector"></select></label></div><div class="panel"><div class="detail-grid"><div><svg id="plan-chart" viewBox="0 0 700 235" role="img" aria-label="Minimum median and maximum advertised rent"></svg><p class="note">Minimum · median · maximum advertised rent; flat trends still draw lines and markers.</p><svg id="inventory-chart" viewBox="0 0 700 120" role="img" aria-label="Advertised listing count"></svg></div><div id="plan-summary"></div></div></div></section>
+<section><h2>Layout detail</h2><div class="controls"><label>Layout<select id="plan-selector"></select></label></div><div class="panel"><div class="detail-grid"><div class="chart-column"><div class="chart-block"><div class="chart-heading"><span class="chart-title">Advertised rent</span><span class="legend"><span class="min"><i></i>Minimum</span><span class="med"><i></i>Median</span><span class="max"><i></i>Maximum</span></span></div><svg id="plan-chart" viewBox="0 0 700 235" role="img" aria-label="Minimum median and maximum advertised rent"></svg></div></div><aside id="plan-summary" aria-label="Selected layout summary"></aside></div></div></section>
 <section><h2>How to use this</h2><p class="note">Start with Personal fit, then compare the rent range and market signal. A layout can have both strong and weak exposures; homes below floor 5 are excluded when an eligible alternative exists, and floors 5–6 remain below the preferred floor-7 threshold. Individual listings are intentionally not published. Disappearance only means no longer advertised, not leased.</p></section>
 <section id="scoring-methodology"><h2>Scoring methodology</h2><p class="note">The 100-point personal-fit score is intentionally transparent. It reflects the stated preference for floor 5 minimum / floor 7+ preferred, southeast light, an interior pool-facing home, and the observed northwest mountain shade. Skyline labels require floor 7+ evidence; direction alone never creates a Manhattan-view claim. Every advertised room is joined to the verified PDF catalog before scoring.</p><div class="method-grid">
 <article class="method-card method-wide"><h3>Relative asking rent</h3><strong class="weight">35 points</strong><p>Compared only with other current homes in the same floor plan. Formula: round(clamp(28 − 1.4 × percent above the layout median, 14, 35)). At the median: 28; about 5% below: 35; 10% above: 14. This prevents a larger layout from winning simply because it is larger.</p></article>
@@ -449,6 +517,6 @@ def generate_report(
 <article class="method-card"><h3>Floor-plan size</h3><strong class="weight">0 direct points</strong><p>Square footage and bedroom layout are shown for comparison but do not directly add points. Their cost is already handled through within-layout rent comparison.</p></article></div>
 <p class="note method-foot"><strong>Labels:</strong> Best match 82–100 · Strong 70–81 · Consider 58–69 · Low fit below 58. Floor rules override these labels: floors 2–4 are below minimum, and floors 5–6 are capped at Strong. A home with no verified traits is not rated.</p></section>
 </main><script id="plan-data" type="application/json">{json_for_script(plan_data)}</script><script>
-(()=>{{const plans=JSON.parse(document.querySelector('#plan-data').textContent),money=v=>new Intl.NumberFormat('en-US',{{style:'currency',currency:'USD',maximumFractionDigits:0}}).format(v/100),date=v=>new Date(v).toLocaleDateString(undefined,{{month:'short',day:'numeric'}}),make=(n,a)=>{{const e=document.createElementNS('http://www.w3.org/2000/svg',n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));return e}},label=(svg,attrs,value)=>{{const node=make('text',attrs);node.textContent=value;svg.append(node)}},path=(svg,points,field,klass,h=235,range=null)=>{{if(!points.length)return;const w=700,l=52,r=12,t=12,b=30,vs=points.map(p=>p[field]),lo=range?range.lo:Math.min(...vs),hi=range?range.hi:Math.max(...vs),x=i=>l+i*(w-l-r)/Math.max(points.length-1,1),y=v=>hi===lo?(t+h-b)/2:h-b-(v-lo)*(h-t-b)/(hi-lo);svg.append(make('polyline',{{points:points.map((p,i)=>`${{x(i).toFixed(1)}},${{y(p[field]).toFixed(1)}}`).join(' '),'class':klass}}));points.forEach((p,i)=>{{const dot=make('circle',{{cx:x(i),cy:y(p[field]),r:4,'class':'dot'}}),tooltip=make('title',{{}}),name=field==='units'?'Advertised listings':field[0].toUpperCase()+field.slice(1);tooltip.textContent=`${{date(p.timestamp)}} · ${{name}}: ${{field==='units'?p[field]:money(p[field])}}`;dot.append(tooltip);svg.append(dot)}});return {{lo,hi}}}};
-const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),ic=document.querySelector('#inventory-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();ic.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));path(ic,p.points,'units','line-med',120);const r=p.recommendation,reason=r.reasons.slice(0,3).join('; ');pSum.innerHTML=`<dl><dt>Personal fit</dt><dd>${{r.score===null?'—':r.score+'/100 · '+r.label}}</dd><dt>Why</dt><dd>${{reason}}</dd><dt>Rated current homes</dt><dd>${{r.rated_count}}/${{r.unit_count}}</dd><dt>Floor 5+ eligible</dt><dd>${{r.eligible_floor_count}}</dd><dt>Floor 7+ preferred</dt><dd>${{r.preferred_floor_count}}</dd><dt>Preferred southeast</dt><dd>${{r.preferred_count}}</dd><dt>Pool-facing interior</dt><dd>${{r.pool_facing_count}}</dd><dt>Low-sun northwest</dt><dd>${{r.low_sun_count}}</dd><dt>Market signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
+(()=>{{const plans=JSON.parse(document.querySelector('#plan-data').textContent),money=v=>new Intl.NumberFormat('en-US',{{style:'currency',currency:'USD',maximumFractionDigits:0}}).format(v/100),date=v=>new Date(v).toLocaleDateString(undefined,{{month:'short',day:'numeric'}}),make=(n,a)=>{{const e=document.createElementNS('http://www.w3.org/2000/svg',n);Object.entries(a).forEach(([k,v])=>e.setAttribute(k,v));return e}},label=(svg,attrs,value)=>{{const node=make('text',attrs);node.textContent=value;svg.append(node)}},path=(svg,points,field,klass,h=235,range=null)=>{{if(!points.length)return;const w=700,l=52,r=12,t=12,b=30,vs=points.map(p=>p[field]),lo=range?range.lo:Math.min(...vs),hi=range?range.hi:Math.max(...vs),x=i=>l+i*(w-l-r)/Math.max(points.length-1,1),y=v=>hi===lo?(t+h-b)/2:h-b-(v-lo)*(h-t-b)/(hi-lo);svg.append(make('polyline',{{points:points.map((p,i)=>`${{x(i).toFixed(1)}},${{y(p[field]).toFixed(1)}}`).join(' '),'class':klass}}));points.forEach((p,i)=>svg.append(make('circle',{{cx:x(i),cy:y(p[field]),r:4,'class':'dot'}})));return {{lo,hi}}}},tooltips=(svg,points,fields,h)=>{{const w=700,l=52,r=12,plot=w-l-r,cell=plot/Math.max(points.length-1,1),boxW=176,boxH=fields.length===1?48:86;points.forEach((p,i)=>{{const x=l+i*cell,target=make('rect',{{x:Math.max(l,x-cell/2),y:0,width:Math.max(cell,16),height:h,'class':'hover-target',tabindex:0,'aria-label':`${{date(p.timestamp)}}. ${{fields.map(([field,name])=>`${{name}}: ${{field==='units'?p[field]:money(p[field])}}`).join('. ')}}`}}),show=()=>{{svg.querySelector('.chart-tooltip')?.remove();const tx=Math.min(Math.max(x-boxW/2,4),w-boxW-4),ty=8,g=make('g',{{'class':'chart-tooltip'}});g.append(make('rect',{{x:tx,y:ty,width:boxW,height:boxH,rx:4}}));label(g,{{x:tx+12,y:ty+18}},date(p.timestamp));fields.forEach(([field,name],j)=>label(g,{{x:tx+12,y:ty+37+j*15}},`${{name}}: ${{field==='units'?p[field]:money(p[field])}}`));svg.append(g)}},hide=()=>svg.querySelector('.chart-tooltip')?.remove();target.addEventListener('pointerenter',show);target.addEventListener('pointerleave',hide);target.addEventListener('focus',show);target.addEventListener('blur',hide);svg.append(target)}})}};
+const ps=document.querySelector('#plan-selector'),pc=document.querySelector('#plan-chart'),pSum=document.querySelector('#plan-summary');ps.innerHTML=plans.map(p=>`<option value="${{p.key}}">${{p.layout}} · ${{p.sqft}} sq ft</option>`).join('');function renderPlan(){{const p=plans.find(x=>x.key===ps.value);if(!p)return;pc.replaceChildren();const rentValues=p.points.flatMap(point=>[point.min,point.median,point.max]),scale={{lo:Math.min(...rentValues),hi:Math.max(...rentValues)}};[48,205].forEach(y=>pc.append(make('line',{{x1:52,y1:y,x2:688,y2:y,'class':'chart-grid'}})));path(pc,p.points,'min','line-min',235,scale);path(pc,p.points,'median','line-med',235,scale);path(pc,p.points,'max','line-max',235,scale);label(pc,{{x:2,y:18,'class':'chart-label'}},money(scale.hi));label(pc,{{x:2,y:205,'class':'chart-label'}},money(scale.lo));label(pc,{{x:52,y:228,'class':'chart-label'}},date(p.points[0].timestamp));label(pc,{{x:688,y:228,'class':'chart-label','text-anchor':'end'}},date(p.points.at(-1).timestamp));tooltips(pc,p.points,[['min','Minimum'],['median','Median'],['max','Maximum']],235);const r=p.recommendation,reason=r.reasons.slice(0,3).join('; ');pSum.innerHTML=`<dl><dt>Personal fit</dt><dd>${{r.score===null?'—':r.score+'/100 · '+r.label}}</dd><dt>Why</dt><dd>${{reason}}</dd><dt>Rated current homes</dt><dd>${{r.rated_count}}/${{r.unit_count}}</dd><dt>Floor 5+ eligible</dt><dd>${{r.eligible_floor_count}}</dd><dt>Floor 7+ preferred</dt><dd>${{r.preferred_floor_count}}</dd><dt>Preferred southeast</dt><dd>${{r.preferred_count}}</dd><dt>Pool-facing interior</dt><dd>${{r.pool_facing_count}}</dd><dt>Low-sun northwest</dt><dd>${{r.low_sun_count}}</dd><dt>Market signal</dt><dd>${{p.signal}}</dd><dt>Lowest advertised rent</dt><dd>${{p.low_rent||'—'}}</dd><dt>Available now</dt><dd>${{p.available_now}}</dd><dt>Newly visible</dt><dd>${{p.points.at(-1).new}}</dd><dt>Price reductions</dt><dd>${{p.points.at(-1).reductions}}</dd><dt>Complete snapshot days</dt><dd>${{p.coverage_days}}</dd></dl>`}}ps.onchange=renderPlan;document.querySelectorAll('.plan-link').forEach(b=>b.onclick=()=>{{ps.value=b.dataset.plan;renderPlan();document.querySelector('#plan-selector').scrollIntoView({{behavior:'smooth',block:'center'}})}});renderPlan()}})();</script></body></html>'''
     output_file.write_text(document, encoding="utf-8")

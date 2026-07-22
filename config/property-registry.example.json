@@ -1,0 +1,20 @@
+{
+  "properties": [
+    {
+      "key": "property-a",
+      "public_label": "Building A",
+      "name": "REPLACE_IN_PRIVATE_COPY",
+      "public_url": "https://example.invalid/property-page",
+      "source": {"page_id": "REPLACE_IN_PRIVATE_COPY"},
+      "city": "REPLACE_IN_PRIVATE_COPY",
+      "neighborhood": "REPLACE_IN_PRIVATE_COPY",
+      "provider": "veris",
+      "adapter_version": "veris_wp_ajax_v1",
+      "enabled": false,
+      "last_contract_verification": "2000-01-01",
+      "compliance_status": "not_reviewed",
+      "capabilities": {"market": true, "traits": false},
+      "mode": "market_only"
+    }
+  ]
+}

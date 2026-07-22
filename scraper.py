@@ -19,10 +19,15 @@ from urllib.request import Request, urlopen
 
 from catalog import secure_unit_id
 from g import update_google_sheet
+from portfolio import (
+    AccessComplianceBlocked,
+    DomainRequestGovernor,
+    PropertyMode,
+    load_registry,
+    probe_registry,
+)
 from report import generate_report
 
-BUILDING_PAGE_ID = os.environ.get("RENTAL_BUILDING_PAGE_ID", "")
-APARTMENTS = {"Building A": BUILDING_PAGE_ID} if BUILDING_PAGE_ID else {}
 AJAX_URL = "https://verisresidential.com/wp-admin/admin-ajax.php"
 USER_AGENT = "RentalMarketTracker/1.0"
 REQUEST_TIMEOUT_SECONDS = 15
@@ -94,14 +99,14 @@ def anonymize_snapshot_rows(
     for row in floorplans:
         source_id, source_name = row["floorplan_id"], row["floorplan"]
         layout_map[source_id] = (opaque_label("layout", source_name), opaque_label("layout-id", source_id))
-        row["apartment"] = "Building A"
+        # The registry supplies a stable anonymous property label (Building A,
+        # Building B, ...); preserve it across portfolio persistence.
         row["floorplan"], row["floorplan_id"] = layout_map[source_id]
     for row in unit_details:
         source_id, source_name = row["floorplan_id"], row["floorplan"]
         layout = layout_map.get(
             source_id, (opaque_label("layout", source_name), opaque_label("layout-id", source_id))
         )
-        row["apartment"] = "Building A"
         row["floorplan"], row["floorplan_id"] = layout
         row["unit_id"] = secure_unit_id(row["unit_id"], unit_hash_key)
     return floorplans, unit_details
@@ -196,7 +201,10 @@ def overview_payload(page_id: str) -> dict[str, Any]:
     }
 
 
-def post_json(form: Mapping[str, str]) -> dict[str, Any]:
+def post_json(
+    form: Mapping[str, str], governor: DomainRequestGovernor | None = None,
+    property_key: str = "building-a",
+) -> dict[str, Any]:
     """POST an AJAX form with bounded retries and return its JSON object response."""
     encoded = urlencode(form).encode("utf-8")
     request = Request(
@@ -207,16 +215,34 @@ def post_json(form: Mapping[str, str]) -> dict[str, Any]:
     )
     last_error: Exception | None = None
     for attempt in range(REQUEST_ATTEMPTS):
+        if governor:
+            governor.before_request(property_key)
+        started = time.monotonic()
         try:
             with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                body = response.read()
+                if governor:
+                    governor.record(
+                        getattr(response, "status", 200), time.monotonic() - started, len(body), body
+                    )
+                payload = json.loads(body.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise RuntimeError("Inventory endpoint returned a non-object JSON response")
             return payload
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+        except HTTPError as error:
+            if governor:
+                governor.record(error.code, time.monotonic() - started, 0)
+            if error.code in {401, 403, 429}:
+                raise AccessComplianceBlocked(f"HTTP {error.code} access/compliance response") from error
             last_error = error
-            if attempt + 1 < REQUEST_ATTEMPTS:
-                time.sleep(0.5 * (attempt + 1))
+            if error.code < 500:
+                break
+        except (URLError, TimeoutError, json.JSONDecodeError) as error:
+            last_error = error
+        if attempt + 1 < REQUEST_ATTEMPTS:
+            if governor:
+                governor.record_retry()
+            time.sleep(0.5 * (attempt + 1))
     raise RuntimeError(
         f"Inventory request failed after {REQUEST_ATTEMPTS} attempts: {last_error}"
     ) from last_error
@@ -234,10 +260,13 @@ def parse_overview_response(
 ) -> tuple[list[dict[str, str]], int]:
     """Map overview data to the established floor-plan CSV schema."""
     raw_rows = response.get("apts_result")
+    if raw_rows is None and response.get("schema_version") == "veris_wp_ajax_v1.1":
+        raw_rows = response.get("results")
     if not isinstance(raw_rows, list) or not raw_rows:
         raise RuntimeError("Overview response contains no floor plans")
     try:
-        expected_count = int(str(response["apt_count"]))
+        count_value = response.get("apt_count", response.get("total_count"))
+        expected_count = int(str(count_value))
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError("Overview response has an invalid apt_count") from error
     if expected_count <= 0:
@@ -275,6 +304,8 @@ def parse_floorplan_response(
 ) -> list[dict[str, str]]:
     """Map a floor-plan detail response to the established unit CSV schema."""
     raw_rows = response.get("query_response")
+    if raw_rows is None and response.get("schema_version") == "veris_wp_ajax_v1.1":
+        raw_rows = response.get("units")
     if not isinstance(raw_rows, list) or not raw_rows:
         raise RuntimeError(f"Floor plan {floorplan['floorplan']} has no individual unit records")
 
@@ -310,6 +341,16 @@ def parse_floorplan_response(
             }
         )
     return units
+
+
+# Collector execution uses the versioned adapter module. These aliases preserve
+# the established public imports while provider response fields stay out of
+# persistence and reporting code.
+from provider_veris import (  # noqa: E402
+    overview_payload as overview_payload,
+    parse_floorplan_response as parse_floorplan_response,
+    parse_overview_response as parse_overview_response,
+)
 
 
 PostJSON = Callable[[Mapping[str, str]], dict[str, Any]]
@@ -351,14 +392,19 @@ def scrape_apartment(
 
 
 def scrape_all() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    if not APARTMENTS:
-        raise RuntimeError("Set RENTAL_BUILDING_PAGE_ID before collecting inventory")
+    configs = [config for config in load_registry() if config.enabled]
+    if not configs:
+        raise RuntimeError("Private property registry has no enabled properties")
     units: list[dict[str, str]] = []
     unit_details: list[dict[str, str]] = []
-    catalog_rows = read_rows_csv(UNIT_TRAITS_FILE)
-    for apartment, page_id in APARTMENTS.items():
+    governor = DomainRequestGovernor(max_properties=3)
+    for config in configs:
+        catalog_rows = None
+        if config.mode is PropertyMode.TRAIT_ENRICHED:
+            catalog_rows = read_rows_csv(Path(config.traits_catalog_path or UNIT_TRAITS_FILE))
+        post = lambda form, key=config.key: post_json(form, governor, key)
         apartment_units, apartment_unit_details = scrape_apartment(
-            apartment, page_id, catalog_rows=catalog_rows
+            config.public_label, config.page_id, post=post, catalog_rows=catalog_rows
         )
         units.extend(apartment_units)
         unit_details.extend(apartment_unit_details)
@@ -597,7 +643,13 @@ def main() -> None:
     parser.add_argument("--no-sheets", action="store_true", help="Skip the optional Google Sheets export.")
     parser.add_argument("--report-only", action="store_true", help="Rebuild the local report without scraping.")
     parser.add_argument("--anonymize-history", action="store_true", help="Pseudonymize retained history and rebuild the report.")
+    parser.add_argument("--probe-properties", action="store_true", help="Validate private registry and print no-write compatibility statuses.")
+    parser.add_argument("--no-write", action="store_true", help="Alias for dry-run safety in compatibility research.")
     args = parser.parse_args()
+    if args.probe_properties:
+        for result in probe_registry(load_registry()):
+            print(json.dumps(result, sort_keys=True))
+        return
     if args.anonymize_history:
         anonymize_history_file(CSV_FILE, CSV_FIELDS)
         anonymize_history_file(UNIT_CSV_FILE, UNIT_CSV_FIELDS)
@@ -622,7 +674,7 @@ def main() -> None:
         print("[INFO] No price changes since the previous snapshot.")
     else:
         print("[INFO] First snapshot saved; future runs will report price changes.")
-    if args.dry_run:
+    if args.dry_run or args.no_write:
         return
 
     previous_unit_details = read_rows_csv(UNIT_CSV_FILE)

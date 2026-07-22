@@ -74,8 +74,8 @@ class ScraperHelpersTest(unittest.TestCase):
                 {
                     "timestamp": TIMESTAMP,
                     "apartment": "Building A",
-                    "floorplan": "S3",
-                    "floorplan_id": "3553544",
+                    "floorplan": "Example Studio",
+                    "floorplan_id": "fixture-floorplan",
                     "sqft": "618",
                     "move_in": "Immediate",
                     "price": "$3,757",
@@ -94,10 +94,10 @@ class ScraperHelpersTest(unittest.TestCase):
             TIMESTAMP,
             today=date(2026, 7, 12),
         )
-        self.assertEqual(units[0]["unit_id"], "CAP-9001")
+        self.assertEqual(units[0]["unit_id"], "source-listing-alpha")
         self.assertEqual(units[0]["price"], "$3,757")
         self.assertEqual(units[0]["move_in"], "Immediate")
-        self.assertEqual(units[1]["unit_id"], "CAP-9002")
+        self.assertEqual(units[1]["unit_id"], "source-listing-beta")
         self.assertEqual(units[1]["price"], "$3,925")
         self.assertEqual(units[1]["move_in"], "Jul 20")
 
@@ -119,6 +119,31 @@ class ScraperHelpersTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "no individual unit records"):
             parse_floorplan_response({}, floorplans[0], "Building A", TIMESTAMP)
+
+    def test_supported_adapter_variant_uses_explicit_schema_version(self):
+        overview = load_fixture("overview_response.json")
+        variant = {
+            "schema_version": "veris_wp_ajax_v1.1",
+            "results": overview["apts_result"],
+            "total_count": overview["apt_count"],
+        }
+        floorplans, count = parse_overview_response(variant, "Building B", TIMESTAMP)
+        detail = load_fixture("floorplan_s3_response.json")
+        units = parse_floorplan_response(
+            {"schema_version": "veris_wp_ajax_v1.1", "units": detail["query_response"]},
+            floorplans[0], "Building B", TIMESTAMP, today=date(2026, 7, 12),
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(len(units), 2)
+
+    def test_malformed_overview_and_missing_required_field_fail(self):
+        with self.assertRaisesRegex(RuntimeError, "no floor plans"):
+            parse_overview_response({"apts_result": "bad", "apt_count": 1},
+                                    "Building A", TIMESTAMP)
+        overview = load_fixture("overview_response.json")
+        del overview["apts_result"][0]["sqft_commas"]
+        with self.assertRaisesRegex(RuntimeError, "sqft_commas"):
+            parse_overview_response(overview, "Building A", TIMESTAMP)
 
     def test_count_mismatch_fails_loudly(self):
         overview = load_fixture("overview_response.json")
@@ -144,7 +169,7 @@ class ScraperHelpersTest(unittest.TestCase):
         self.assertTrue(floorplans[0]["floorplan"].startswith("layout-"))
         self.assertTrue(units[0]["floorplan_id"].startswith("layout-id-"))
         self.assertTrue(units[0]["unit_id"].startswith("listing-"))
-        self.assertNotIn("CAP-9001", units[0].values())
+        self.assertNotIn("source-listing-alpha", units[0].values())
 
     def test_live_inventory_must_match_verified_catalog(self):
         live = [
