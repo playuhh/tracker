@@ -64,6 +64,10 @@ that layout's recorded square footage.
   with modest inefficiency deducts 4 points; substantial circulation or
   hard-to-use space deducts 15. The penalty is not an exclusion and can be
   offset by rent, exposure, floor, or view.
+- The scoring join is residence → exact private floor-plan code → reviewed
+  layout efficiency. Public `Layout N` labels are generated from the currently
+  visible plans sorted by square footage, so they are not durable identifiers;
+  use square footage plus the ignored private mapping when diagnosing a plan.
 - Never infer a Manhattan/skyline view from direction alone. The current model
   requires floor 7+ and appropriate facade geometry; resident confirmation is
   stronger evidence and must be labeled separately from modeled geometry.
@@ -83,6 +87,10 @@ that layout's recorded square footage.
   score. Unknown traits remain explicitly unrated.
 
 ## Operating runbook
+
+Plan-specific image provenance, A/B review decisions, current anonymous-label
+crosswalks, and Pages cache diagnostics belong in ignored
+`private/FLOORPLAN_CONTEXT.md`, not in tracked public context.
 
 ### Collection modes
 
