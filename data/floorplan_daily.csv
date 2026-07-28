@@ -201,3 +201,9 @@ timestamp,apartment,floorplan,floorplan_id,sqft,visible_units,min_rent,median_re
 2026-07-27T15:44:29+00:00,Building A,layout-16a36e86,layout-id-af1e9cfa,767,5,"$4,007","$4,120","$4,271",$5.22,$5.37,$5.57,0,0,Immediate
 2026-07-27T15:44:29+00:00,Building A,layout-c8361f9b,layout-id-af2a3fbd,709,2,"$4,112","$4,194.50","$4,277",$5.80,$5.91,$6.03,0,0,Immediate
 2026-07-27T15:44:29+00:00,Building A,layout-0cd20d37,layout-id-fd556c01,1117,2,"$5,383","$5,390.50","$5,398",$4.82,$4.82,$4.83,0,0,Immediate
+2026-07-28T15:23:38+00:00,Building A,layout-abdbc2b5,layout-id-0e981ccc,1080,4,"$5,198","$5,224.50","$5,483",$4.81,$4.83,$5.08,0,4,Immediate
+2026-07-28T15:23:38+00:00,Building A,layout-4e808094,layout-id-1f421da1,779,1,"$4,033","$4,033","$4,033",$5.18,$5.18,$5.18,0,0,Sep 18
+2026-07-28T15:23:38+00:00,Building A,layout-44d6a8a7,layout-id-9d709221,618,2,"$3,757","$3,841","$3,925",$6.08,$6.21,$6.35,0,0,Immediate
+2026-07-28T15:23:38+00:00,Building A,layout-16a36e86,layout-id-af1e9cfa,767,5,"$4,007","$4,103","$4,271",$5.22,$5.35,$5.57,0,2,Immediate
+2026-07-28T15:23:38+00:00,Building A,layout-c8361f9b,layout-id-af2a3fbd,709,2,"$4,112","$4,194.50","$4,277",$5.80,$5.91,$6.03,0,0,Immediate
+2026-07-28T15:23:38+00:00,Building A,layout-0cd20d37,layout-id-fd556c01,1117,2,"$5,270","$5,284.50","$5,299",$4.72,$4.73,$4.74,0,2,Immediate
