@@ -360,6 +360,7 @@ def scrape_apartment(
     apartment: str, page_id: str, post: PostJSON = post_json,
     unit_hash_key: str | None = None,
     catalog_rows: Iterable[dict[str, str]] | None = None,
+    floorplan_prefixes: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Collect one overview plus one public detail request per floor plan."""
     print(f"[INFO] Loading {apartment}...")
@@ -375,6 +376,15 @@ def scrape_apartment(
             f"Overview reports {expected_unit_count} available units, but detail requests returned "
             f"{len(unit_details)}"
         )
+    if floorplan_prefixes:
+        floorplans = [row for row in floorplans if any(
+            row["floorplan"].casefold().startswith(prefix.casefold() + " ")
+            for prefix in floorplan_prefixes
+        )]
+        if not floorplans:
+            raise RuntimeError("No verified floor plans matched the private inventory scope")
+        selected_ids = {row["floorplan_id"] for row in floorplans}
+        unit_details = [row for row in unit_details if row["floorplan_id"] in selected_ids]
     print(
         f"[INFO] Found {len(floorplans)} floor plans and {len(unit_details)} individual units "
         f"for {apartment}."
@@ -395,6 +405,8 @@ def scrape_all() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     configs = [config for config in load_registry() if config.enabled]
     if not configs:
         raise RuntimeError("Private property registry has no enabled properties")
+    if any(config.floorplan_prefixes for config in configs):
+        raise RuntimeError("Scoped inventory must use private_market.py; public history is unchanged")
     units: list[dict[str, str]] = []
     unit_details: list[dict[str, str]] = []
     governor = DomainRequestGovernor(max_properties=3)

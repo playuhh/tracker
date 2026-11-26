@@ -57,6 +57,7 @@ class PropertyConfig:
     mode: PropertyMode
     capabilities: Capabilities
     traits_catalog_path: str | None = None
+    floorplan_prefixes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,13 @@ def validate_registry(raw: Mapping[str, Any], base_dir: Path | None = None) -> l
         source = item.get("source")
         if not isinstance(source, Mapping) or not str(source.get("page_id", "")).strip():
             raise ValueError(f"Property {key!r} is missing private source configuration")
+        prefixes = source.get("floorplan_prefixes", [])
+        if not isinstance(prefixes, list) or any(
+            not isinstance(prefix, str) or not prefix.strip() for prefix in prefixes
+        ):
+            raise ValueError("Private floor-plan prefixes must be a list of nonempty strings")
+        if prefixes and mode is not PropertyMode.MARKET_ONLY:
+            raise ValueError("Scoped inventory is only supported in market_only mode")
         capabilities_raw = item.get("capabilities", {})
         if not isinstance(capabilities_raw, Mapping):
             raise ValueError(f"Property {key!r} capabilities must be an object")
@@ -171,6 +179,7 @@ def validate_registry(raw: Mapping[str, Any], base_dir: Path | None = None) -> l
             mode=mode,
             capabilities=capabilities,
             traits_catalog_path=str(resolved_catalog or catalog) if catalog else None,
+            floorplan_prefixes=tuple(prefix.strip() for prefix in prefixes),
         ))
     return configs
 
